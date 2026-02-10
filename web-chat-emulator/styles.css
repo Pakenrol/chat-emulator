@@ -13,6 +13,7 @@
   --match: #fff8b8;
   --match-active: #ffe16a;
   --shadow: 0 12px 30px rgba(41, 30, 17, 0.1);
+  --search-suggestion-row-height: 70;
   font-family: Manrope, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
 }
 
@@ -178,6 +179,7 @@ button:disabled {
 }
 
 .search-suggestions {
+  position: relative;
   border: 1px solid #d6c7b3;
   border-radius: 12px;
   background: #fff8ee;
@@ -186,8 +188,17 @@ button:disabled {
   padding: 0.26rem;
 }
 
-.search-suggestion {
+.search-suggestions-canvas {
+  position: relative;
   width: 100%;
+  min-height: 100%;
+}
+
+.search-suggestion {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: calc(var(--search-suggestion-row-height) * 1px);
   min-height: 0;
   display: grid;
   gap: 0.22rem;
@@ -383,6 +394,10 @@ button:disabled {
 
   .search-suggestions {
     max-height: min(34dvh, 260px);
+  }
+
+  :root {
+    --search-suggestion-row-height: 66;
   }
 
   .search-suggestion {

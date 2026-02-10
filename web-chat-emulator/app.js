@@ -1,7 +1,7 @@
 const ESTIMATED_ROW_HEIGHT = 78;
 const OVERSCAN = 12;
 const SEARCH_DEBOUNCE_MS = 160;
-const MAX_SEARCH_PREVIEW_ITEMS = 8;
+const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 
 const dom = {
   fileInput: document.querySelector("#fileInput"),
@@ -12,6 +12,7 @@ const dom = {
   searchSection: document.querySelector(".search"),
   searchInput: document.querySelector("#searchInput"),
   searchSuggestions: document.querySelector("#searchSuggestions"),
+  searchSuggestionsCanvas: document.querySelector("#searchSuggestionsCanvas"),
   searchStatus: document.querySelector("#searchStatus"),
   prevMatchBtn: document.querySelector("#prevMatchBtn"),
   nextMatchBtn: document.querySelector("#nextMatchBtn"),
@@ -28,9 +29,12 @@ const state = {
   allIndexes: [],
   searchResults: [],
   activeSearchResult: -1,
-  searchPreviewResultPositions: [],
-  activePreviewIndex: -1,
+  previewCursor: -1,
   searchSuggestionsVisible: false,
+  suggestionsRenderedStart: -1,
+  suggestionsRenderedEnd: -1,
+  suggestionsRenderQueued: false,
+  suggestionsForceNextRender: false,
   searchQuery: "",
   previousSearchQuery: "",
   rowHeights: [],
@@ -164,8 +168,19 @@ function attachEvents() {
   dom.searchInput.addEventListener("keydown", handleSearchInputKeydown);
 
   dom.searchSuggestions.addEventListener("mousedown", (event) => {
-    event.preventDefault();
+    const target = event.target;
+    if (target instanceof Element && target.closest(".search-suggestion")) {
+      event.preventDefault();
+    }
   });
+
+  dom.searchSuggestions.addEventListener(
+    "scroll",
+    () => {
+      scheduleSearchSuggestionsRender();
+    },
+    { passive: true },
+  );
 
   dom.searchSuggestions.addEventListener("click", (event) => {
     const target = event.target;
@@ -178,9 +193,9 @@ function attachEvents() {
       return;
     }
 
-    const previewIndex = Number(option.dataset.previewIndex);
-    if (Number.isInteger(previewIndex)) {
-      selectSearchPreview(previewIndex);
+    const resultPosition = Number(option.dataset.resultPosition);
+    if (Number.isInteger(resultPosition)) {
+      selectSearchResultPosition(resultPosition);
     }
   });
 
@@ -193,6 +208,11 @@ function attachEvents() {
 
   window.addEventListener("resize", () => {
     renderVisibleMessages(true);
+    if (state.searchSuggestionsVisible) {
+      state.suggestionsRenderedStart = -1;
+      state.suggestionsRenderedEnd = -1;
+      scheduleSearchSuggestionsRender(true);
+    }
   });
 
   if (typeof ResizeObserver !== "undefined") {
@@ -353,9 +373,12 @@ function hydrateConversation(payload) {
   state.allIndexes = Array.from({ length: state.messages.length }, (_, index) => index);
   state.searchResults = [];
   state.activeSearchResult = -1;
-  state.searchPreviewResultPositions = [];
-  state.activePreviewIndex = -1;
+  state.previewCursor = -1;
   state.searchSuggestionsVisible = false;
+  state.suggestionsRenderedStart = -1;
+  state.suggestionsRenderedEnd = -1;
+  state.suggestionsRenderQueued = false;
+  state.suggestionsForceNextRender = false;
   state.searchQuery = "";
   state.previousSearchQuery = "";
 
@@ -423,9 +446,12 @@ function resetConversationState() {
   state.allIndexes = [];
   state.searchResults = [];
   state.activeSearchResult = -1;
-  state.searchPreviewResultPositions = [];
-  state.activePreviewIndex = -1;
+  state.previewCursor = -1;
   state.searchSuggestionsVisible = false;
+  state.suggestionsRenderedStart = -1;
+  state.suggestionsRenderedEnd = -1;
+  state.suggestionsRenderQueued = false;
+  state.suggestionsForceNextRender = false;
   state.searchQuery = "";
   state.previousSearchQuery = "";
   state.rowHeights = [];
@@ -441,7 +467,8 @@ function resetConversationState() {
   dom.prevMatchBtn.disabled = true;
   dom.nextMatchBtn.disabled = true;
   dom.searchSuggestions.hidden = true;
-  dom.searchSuggestions.replaceChildren();
+  dom.searchSuggestionsCanvas.style.height = "0px";
+  dom.searchSuggestionsCanvas.replaceChildren();
 }
 
 function renderVisibleMessages(force = false) {
@@ -559,8 +586,7 @@ function runSearch(rawQuery) {
   if (!state.searchQuery) {
     state.searchResults = [];
     state.activeSearchResult = -1;
-    state.searchPreviewResultPositions = [];
-    state.activePreviewIndex = -1;
+    state.previewCursor = -1;
     state.previousSearchQuery = "";
     closeSearchSuggestions();
     updateSearchUi();
@@ -581,13 +607,14 @@ function runSearch(rawQuery) {
 
   state.searchResults = nextResults;
   state.activeSearchResult = nextResults.length ? 0 : -1;
-  state.activePreviewIndex = nextResults.length ? 0 : -1;
+  state.previewCursor = state.activeSearchResult;
   state.previousSearchQuery = state.searchQuery;
 
   if (!nextResults.length) {
     closeSearchSuggestions();
   } else if (state.searchSuggestionsVisible) {
-    renderSearchSuggestions();
+    ensurePreviewCursorVisible();
+    scheduleSearchSuggestionsRender(true);
   }
 
   updateSearchUi();
@@ -606,6 +633,7 @@ function moveMatchPointer(direction) {
 
   state.activeSearchResult =
     (state.activeSearchResult + direction + length) % length;
+  state.previewCursor = state.activeSearchResult;
 
   updateSearchUi();
 
@@ -613,8 +641,10 @@ function moveMatchPointer(direction) {
   scrollToMessageIndex(messageIndex);
   renderVisibleMessages(true);
 
-  syncActivePreviewWithSearchResult();
-  renderSearchSuggestions();
+  if (state.searchSuggestionsVisible) {
+    ensurePreviewCursorVisible();
+    scheduleSearchSuggestionsRender(true);
+  }
 }
 
 function handleSearchInputKeydown(event) {
@@ -623,27 +653,51 @@ function handleSearchInputKeydown(event) {
     return;
   }
 
-  if (!state.searchSuggestionsVisible || !state.searchPreviewResultPositions.length) {
+  const isNavigationKey =
+    event.key === "ArrowDown" ||
+    event.key === "ArrowUp" ||
+    event.key === "PageDown" ||
+    event.key === "PageUp";
+
+  if (isNavigationKey && !state.searchSuggestionsVisible) {
+    openSearchSuggestions();
+  }
+
+  if (!state.searchSuggestionsVisible || !state.searchResults.length) {
     return;
   }
 
   if (event.key === "ArrowDown") {
     event.preventDefault();
-    moveSearchPreviewPointer(1);
+    movePreviewCursor(1);
     return;
   }
 
   if (event.key === "ArrowUp") {
     event.preventDefault();
-    moveSearchPreviewPointer(-1);
+    movePreviewCursor(-1);
+    return;
+  }
+
+  if (event.key === "PageDown") {
+    event.preventDefault();
+    movePreviewCursor(getSuggestionsPageJump());
+    return;
+  }
+
+  if (event.key === "PageUp") {
+    event.preventDefault();
+    movePreviewCursor(-getSuggestionsPageJump());
     return;
   }
 
   if (event.key === "Enter") {
+    if (state.previewCursor < 0) {
+      return;
+    }
+
     event.preventDefault();
-    const nextPreviewIndex =
-      state.activePreviewIndex >= 0 ? state.activePreviewIndex : 0;
-    selectSearchPreview(nextPreviewIndex);
+    selectSearchResultPosition(state.previewCursor);
   }
 }
 
@@ -658,26 +712,62 @@ function openSearchSuggestions() {
   }
 
   state.searchSuggestionsVisible = true;
-  syncActivePreviewWithSearchResult();
-  if (state.activePreviewIndex < 0) {
-    state.activePreviewIndex = 0;
+  state.suggestionsRenderedStart = -1;
+  state.suggestionsRenderedEnd = -1;
+  state.suggestionsForceNextRender = true;
+
+  if (!Number.isInteger(state.previewCursor) || state.previewCursor < 0) {
+    state.previewCursor = state.activeSearchResult >= 0 ? state.activeSearchResult : 0;
+  }
+
+  if (state.previewCursor >= state.searchResults.length) {
+    state.previewCursor = state.searchResults.length - 1;
   }
 
   dom.searchSuggestions.hidden = false;
   dom.searchInput.setAttribute("aria-expanded", "true");
-  renderSearchSuggestions();
+
+  // First render expands the list, so centering math uses real dimensions.
+  renderSearchSuggestions(true);
+  ensurePreviewCursorVisible(true);
+  scheduleSearchSuggestionsRender(true);
 }
 
 function closeSearchSuggestions() {
   state.searchSuggestionsVisible = false;
-  state.searchPreviewResultPositions = [];
-  state.activePreviewIndex = -1;
+  state.suggestionsRenderedStart = -1;
+  state.suggestionsRenderedEnd = -1;
+  state.suggestionsForceNextRender = false;
   dom.searchSuggestions.hidden = true;
-  dom.searchSuggestions.replaceChildren();
+  dom.searchSuggestionsCanvas.style.height = "0px";
+  dom.searchSuggestionsCanvas.replaceChildren();
   dom.searchInput.setAttribute("aria-expanded", "false");
 }
 
-function renderSearchSuggestions() {
+function scheduleSearchSuggestionsRender(force = false) {
+  if (!state.searchSuggestionsVisible) {
+    return;
+  }
+
+  if (force) {
+    state.suggestionsForceNextRender = true;
+  }
+
+  if (state.suggestionsRenderQueued) {
+    return;
+  }
+
+  state.suggestionsRenderQueued = true;
+
+  requestAnimationFrame(() => {
+    state.suggestionsRenderQueued = false;
+    const shouldForce = state.suggestionsForceNextRender;
+    state.suggestionsForceNextRender = false;
+    renderSearchSuggestions(shouldForce);
+  });
+}
+
+function renderSearchSuggestions(force = false) {
   if (!state.searchSuggestionsVisible) {
     return;
   }
@@ -687,26 +777,34 @@ function renderSearchSuggestions() {
     return;
   }
 
-  const previewCount = Math.min(
-    MAX_SEARCH_PREVIEW_ITEMS,
-    state.searchResults.length,
+  const rowHeight = getSearchSuggestionRowHeight();
+  const viewportHeight = dom.searchSuggestions.clientHeight || 1;
+  const scrollTop = dom.searchSuggestions.scrollTop;
+  const paddingTop = getSearchSuggestionsPaddingTop();
+  const effectiveScrollTop = Math.max(0, scrollTop - paddingTop);
+  const totalHeight = Math.max(state.searchResults.length * rowHeight, viewportHeight);
+
+  dom.searchSuggestionsCanvas.style.height = `${Math.ceil(totalHeight)}px`;
+
+  const start = Math.max(
+    0,
+    Math.floor(effectiveScrollTop / rowHeight) - SEARCH_SUGGESTIONS_OVERSCAN,
   );
-  state.searchPreviewResultPositions = Array.from(
-    { length: previewCount },
-    (_, position) => position,
+  const end = Math.min(
+    state.searchResults.length - 1,
+    Math.floor((effectiveScrollTop + viewportHeight) / rowHeight) + SEARCH_SUGGESTIONS_OVERSCAN,
   );
 
-  if (state.activePreviewIndex >= previewCount) {
-    state.activePreviewIndex = previewCount - 1;
+  if (!force && start === state.suggestionsRenderedStart && end === state.suggestionsRenderedEnd) {
+    return;
   }
-  if (state.activePreviewIndex < 0) {
-    state.activePreviewIndex = 0;
-  }
+
+  state.suggestionsRenderedStart = start;
+  state.suggestionsRenderedEnd = end;
 
   const fragment = document.createDocumentFragment();
 
-  for (let previewIndex = 0; previewIndex < previewCount; previewIndex += 1) {
-    const resultPosition = state.searchPreviewResultPositions[previewIndex];
+  for (let resultPosition = start; resultPosition <= end; resultPosition += 1) {
     const messageIndex = state.searchResults[resultPosition];
     const message = state.messages[messageIndex];
 
@@ -718,13 +816,13 @@ function renderSearchSuggestions() {
     option.type = "button";
     option.role = "option";
     option.className = "search-suggestion";
-    option.dataset.previewIndex = String(previewIndex);
-    option.setAttribute(
-      "aria-selected",
-      String(previewIndex === state.activePreviewIndex),
-    );
+    option.dataset.resultPosition = String(resultPosition);
+    option.style.top = `${Math.round(resultPosition * rowHeight)}px`;
 
-    if (previewIndex === state.activePreviewIndex) {
+    const isActive = resultPosition === state.previewCursor;
+    option.setAttribute("aria-selected", String(isActive));
+
+    if (isActive) {
       option.classList.add("active");
     }
 
@@ -754,37 +852,77 @@ function renderSearchSuggestions() {
     fragment.appendChild(option);
   }
 
-  dom.searchSuggestions.replaceChildren(fragment);
-  const activeOption = dom.searchSuggestions.querySelector(".search-suggestion.active");
-  activeOption?.scrollIntoView({ block: "nearest" });
+  dom.searchSuggestionsCanvas.replaceChildren(fragment);
 }
 
-function moveSearchPreviewPointer(direction) {
-  const length = state.searchPreviewResultPositions.length;
+function movePreviewCursor(direction) {
+  const length = state.searchResults.length;
   if (!length) {
     return;
   }
 
-  if (state.activePreviewIndex < 0) {
-    state.activePreviewIndex = direction > 0 ? 0 : length - 1;
-  } else {
-    state.activePreviewIndex =
-      (state.activePreviewIndex + direction + length) % length;
+  if (!Number.isInteger(state.previewCursor) || state.previewCursor < 0) {
+    state.previewCursor = 0;
   }
 
-  renderSearchSuggestions();
+  state.previewCursor = Math.max(0, Math.min(length - 1, state.previewCursor + direction));
+  ensurePreviewCursorVisible();
+  scheduleSearchSuggestionsRender(true);
 }
 
-function selectSearchPreview(previewIndex) {
-  if (
-    previewIndex < 0 ||
-    previewIndex >= state.searchPreviewResultPositions.length
-  ) {
+function getSuggestionsPageJump() {
+  const rowHeight = getSearchSuggestionRowHeight();
+  const viewportHeight = dom.searchSuggestions.clientHeight || rowHeight;
+  return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1);
+}
+
+function ensurePreviewCursorVisible(center = false) {
+  if (!state.searchSuggestionsVisible) {
     return;
   }
 
-  const resultPosition = state.searchPreviewResultPositions[previewIndex];
-  if (!Number.isInteger(resultPosition)) {
+  const length = state.searchResults.length;
+  if (state.previewCursor < 0 || state.previewCursor >= length) {
+    return;
+  }
+
+  const rowHeight = getSearchSuggestionRowHeight();
+  const viewportHeight = dom.searchSuggestions.clientHeight || 1;
+  const maxScrollTop = Math.max(
+    0,
+    dom.searchSuggestions.scrollHeight - viewportHeight,
+  );
+  const paddingTop = getSearchSuggestionsPaddingTop();
+  const itemTop = paddingTop + state.previewCursor * rowHeight;
+
+  if (center) {
+    dom.searchSuggestions.scrollTop = clampNumber(
+      itemTop - (viewportHeight - rowHeight) * 0.35,
+      0,
+      maxScrollTop,
+    );
+    return;
+  }
+
+  const scrollTop = dom.searchSuggestions.scrollTop;
+  const itemBottom = itemTop + rowHeight;
+  const viewportBottom = scrollTop + viewportHeight;
+
+  if (itemTop < scrollTop) {
+    dom.searchSuggestions.scrollTop = clampNumber(itemTop, 0, maxScrollTop);
+    return;
+  }
+
+  if (itemBottom > viewportBottom) {
+    dom.searchSuggestions.scrollTop = clampNumber(itemBottom - viewportHeight, 0, maxScrollTop);
+  }
+}
+
+function selectSearchResultPosition(resultPosition) {
+  if (
+    resultPosition < 0 ||
+    resultPosition >= state.searchResults.length
+  ) {
     return;
   }
 
@@ -794,7 +932,7 @@ function selectSearchPreview(previewIndex) {
   }
 
   state.activeSearchResult = resultPosition;
-  syncActivePreviewWithSearchResult();
+  state.previewCursor = resultPosition;
   updateSearchUi();
   scrollToMessageIndex(messageIndex);
   renderVisibleMessages(true);
@@ -803,26 +941,23 @@ function selectSearchPreview(previewIndex) {
   dom.searchInput.focus({ preventScroll: true });
 }
 
-function syncActivePreviewWithSearchResult() {
-  const previewCount = Math.min(
-    MAX_SEARCH_PREVIEW_ITEMS,
-    state.searchResults.length,
-  );
+function getSearchSuggestionRowHeight() {
+  const rawValue = getComputedStyle(document.documentElement)
+    .getPropertyValue("--search-suggestion-row-height")
+    .trim();
+  const parsed = Number(rawValue);
 
-  if (!previewCount) {
-    state.activePreviewIndex = -1;
-    return;
+  if (!Number.isFinite(parsed) || parsed <= 10) {
+    return 70;
   }
 
-  if (
-    state.activeSearchResult < 0 ||
-    state.activeSearchResult >= previewCount
-  ) {
-    state.activePreviewIndex = -1;
-    return;
-  }
+  return parsed;
+}
 
-  state.activePreviewIndex = state.activeSearchResult;
+function getSearchSuggestionsPaddingTop() {
+  const rawValue = getComputedStyle(dom.searchSuggestions).paddingTop;
+  const parsed = Number.parseFloat(rawValue);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function buildSearchPreview(source, query) {
