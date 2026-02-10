@@ -30,6 +30,8 @@ const state = {
   searchResults: [],
   activeSearchResult: -1,
   previewCursor: -1,
+  highlightQuery: "",
+  highlightMatcher: null,
   searchSuggestionsVisible: false,
   suggestionsRenderedStart: -1,
   suggestionsRenderedEnd: -1,
@@ -374,6 +376,8 @@ function hydrateConversation(payload) {
   state.searchResults = [];
   state.activeSearchResult = -1;
   state.previewCursor = -1;
+  state.highlightQuery = "";
+  state.highlightMatcher = null;
   state.searchSuggestionsVisible = false;
   state.suggestionsRenderedStart = -1;
   state.suggestionsRenderedEnd = -1;
@@ -447,6 +451,8 @@ function resetConversationState() {
   state.searchResults = [];
   state.activeSearchResult = -1;
   state.previewCursor = -1;
+  state.highlightQuery = "";
+  state.highlightMatcher = null;
   state.searchSuggestionsVisible = false;
   state.suggestionsRenderedStart = -1;
   state.suggestionsRenderedEnd = -1;
@@ -1077,14 +1083,37 @@ function isIndexInSearchResults(index) {
   return false;
 }
 
+function getHighlightMatcher(query) {
+  if (!query) {
+    state.highlightQuery = "";
+    state.highlightMatcher = null;
+    return null;
+  }
+
+  if (state.highlightMatcher && state.highlightQuery === query) {
+    return state.highlightMatcher;
+  }
+
+  state.highlightQuery = query;
+  const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  state.highlightMatcher = new RegExp(escapedQuery, "ig");
+  return state.highlightMatcher;
+}
+
 function appendHighlightedText(target, source, query) {
   if (!query) {
     target.textContent = source;
     return;
   }
 
-  const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matcher = new RegExp(escapedQuery, "ig");
+  const matcher = getHighlightMatcher(query);
+  if (!matcher) {
+    target.textContent = source;
+    return;
+  }
+
+  target.textContent = "";
+  matcher.lastIndex = 0;
   let cursor = 0;
   let match = matcher.exec(source);
 
