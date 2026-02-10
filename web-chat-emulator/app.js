@@ -33,6 +33,8 @@ const state = {
   previewCursor: -1,
   highlightQuery: "",
   highlightMatcher: null,
+  pinToBottom: false,
+  programmaticScroll: false,
   searchSuggestionsVisible: false,
   suggestionsRenderedStart: -1,
   suggestionsRenderedEnd: -1,
@@ -199,6 +201,14 @@ function attachEvents() {
   dom.chatViewport.addEventListener("scroll", () => {
     renderVisibleMessages();
     updateScrollNavButtons();
+
+    if (
+      state.pinToBottom &&
+      !state.programmaticScroll &&
+      !isChatNearBottom()
+    ) {
+      state.pinToBottom = false;
+    }
   });
 
   window.addEventListener("resize", () => {
@@ -519,6 +529,7 @@ function scheduleMeasurement() {
       return;
     }
 
+    const shouldPinBottom = state.pinToBottom || isChatNearBottom();
     let changed = false;
 
     for (const row of dom.chatCanvas.children) {
@@ -534,7 +545,12 @@ function scheduleMeasurement() {
     }
 
     if (changed) {
+      if (shouldPinBottom) {
+        scrollToBottom(true);
+      }
+
       renderVisibleMessages(true);
+      updateScrollNavButtons();
     }
   });
 }
@@ -590,6 +606,7 @@ function moveMatchPointer(direction) {
     return;
   }
 
+  state.pinToBottom = false;
   state.activeSearchResult =
     (state.activeSearchResult + direction + length) % length;
   state.previewCursor = state.activeSearchResult;
@@ -890,6 +907,7 @@ function selectSearchResultPosition(resultPosition) {
     return;
   }
 
+  state.pinToBottom = false;
   state.activeSearchResult = resultPosition;
   state.previewCursor = resultPosition;
   updateSearchUi();
@@ -996,21 +1014,42 @@ function scrollToMessageIndex(index) {
     return;
   }
 
+  state.pinToBottom = false;
   const viewportHeight = dom.chatViewport.clientHeight;
   const top = state.tree.sum(index);
   const messageHeight = state.rowHeights[index] || ESTIMATED_ROW_HEIGHT;
   const offset = (viewportHeight - messageHeight) * 0.5;
 
-  dom.chatViewport.scrollTop = Math.max(0, top - offset);
+  setChatScrollTop(Math.max(0, top - offset));
 }
 
-function scrollToBottom() {
+function setChatScrollTop(value) {
+  state.programmaticScroll = true;
+  dom.chatViewport.scrollTop = value;
+  requestAnimationFrame(() => {
+    state.programmaticScroll = false;
+  });
+}
+
+function isChatNearBottom(epsilon = 2) {
+  const viewportHeight = dom.chatViewport.clientHeight || 1;
+  const maxScrollTop = Math.max(0, dom.chatViewport.scrollHeight - viewportHeight);
+  return dom.chatViewport.scrollTop >= maxScrollTop - epsilon;
+}
+
+function scrollToBottom(syncCanvas = false) {
   if (!state.tree) {
     return;
   }
 
-  const maxScroll = Math.max(0, state.tree.total() - dom.chatViewport.clientHeight);
-  dom.chatViewport.scrollTop = maxScroll;
+  if (syncCanvas) {
+    syncChatCanvasHeight();
+    // Force layout so scrollHeight reflects updated canvas height.
+    void dom.chatViewport.scrollHeight;
+  }
+
+  const maxScroll = Math.max(0, dom.chatViewport.scrollHeight - dom.chatViewport.clientHeight);
+  setChatScrollTop(maxScroll);
 }
 
 function jumpToTop() {
@@ -1018,7 +1057,8 @@ function jumpToTop() {
     return;
   }
 
-  dom.chatViewport.scrollTop = 0;
+  state.pinToBottom = false;
+  setChatScrollTop(0);
   renderVisibleMessages(true);
   updateScrollNavButtons();
 }
@@ -1028,8 +1068,8 @@ function jumpToBottom() {
     return;
   }
 
-  syncChatCanvasHeight();
-  scrollToBottom();
+  state.pinToBottom = true;
+  scrollToBottom(true);
   renderVisibleMessages(true);
   updateScrollNavButtons();
 }
