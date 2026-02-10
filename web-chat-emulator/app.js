@@ -5,6 +5,7 @@ const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 
 const dom = {
   fileInput: document.querySelector("#fileInput"),
+  folderInput: document.querySelector("#folderInput"),
   progressBar: document.querySelector("#progressBar"),
   loadStatus: document.querySelector("#loadStatus"),
   chatMeta: document.querySelector("#chatMeta"),
@@ -49,6 +50,8 @@ const state = {
   measureQueued: false,
   rightSideId: null,
   searchDebounceId: null,
+  assetFiles: null,
+  assetUrlCache: null,
 };
 
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
@@ -124,7 +127,7 @@ class FenwickTree {
 }
 
 attachEvents();
-setEmptyState("Загрузите JSON, чтобы увидеть переписку.");
+setEmptyState("Загрузите JSON или папку с HTML, чтобы увидеть переписку.");
 
 function attachEvents() {
   dom.fileInput.addEventListener("change", (event) => {
@@ -132,6 +135,15 @@ function attachEvents() {
     if (file) {
       beginLoad(file);
     }
+    event.target.value = "";
+  });
+
+  dom.folderInput?.addEventListener("change", (event) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length) {
+      beginLoadDirectory(files);
+    }
+    event.target.value = "";
   });
 
   dom.searchInput.addEventListener("input", () => {
@@ -245,7 +257,18 @@ function attachEvents() {
 
   document.addEventListener("drop", (event) => {
     event.preventDefault();
-    const [file] = event.dataTransfer?.files || [];
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) {
+      return;
+    }
+
+    const htmlFiles = files.filter((file) => /\.html?$/i.test(file.name));
+    if (htmlFiles.length > 1) {
+      beginLoadDirectory(files);
+      return;
+    }
+
+    const [file] = files;
     if (file) {
       beginLoad(file);
     }
@@ -298,12 +321,68 @@ function beginLoad(file) {
   worker.postMessage({ type: "parse-file", file });
 }
 
+function beginLoadDirectory(files) {
+  resetConversationState();
+  state.loading = true;
+  dom.searchInput.disabled = true;
+  dom.searchInput.value = "";
+  dom.searchStatus.textContent = "Идёт загрузка папки...";
+
+  const rootLabel = inferDirectoryLabel(files);
+  setStatus(`Чтение папки: ${rootLabel}`, 0.05);
+  setEmptyState("Идёт обработка HTML‑истории...");
+
+  const { entries, assetFiles } = prepareDirectoryEntries(files);
+  state.assetFiles = assetFiles;
+  state.assetUrlCache = new Map();
+
+  if (state.worker) {
+    state.worker.terminate();
+  }
+
+  const workerUrl = new URL("./parser.worker.js", import.meta.url);
+  const worker = new Worker(workerUrl);
+  state.worker = worker;
+
+  worker.onmessage = (event) => {
+    const payload = event.data;
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+
+    if (payload.type === "progress") {
+      handleProgress(payload);
+      return;
+    }
+
+    if (payload.type === "error") {
+      state.loading = false;
+      setStatus(`Ошибка загрузки: ${payload.message || "неизвестная"}`, 0);
+      dom.searchStatus.textContent = "Поиск недоступен";
+      state.worker?.terminate();
+      state.worker = null;
+      setEmptyState("Не удалось разобрать папку.");
+      return;
+    }
+
+    if (payload.type === "ready") {
+      hydrateConversation(payload);
+    }
+  };
+
+  worker.postMessage({ type: "parse-html-directory", entries });
+}
+
 function handleProgress(payload) {
   const progress = clampNumber(payload.progress, 0, 1);
+  const format = String(payload.format || "");
+  const parsingLabel = format === "html" ? "Парсинг HTML" : "Парсинг JSON";
   const phaseMap = {
-    reading: "Чтение файла",
-    parsing: "Парсинг JSON",
+    scanning: "Сканирование",
+    reading: "Чтение",
+    parsing: parsingLabel,
     normalizing: "Подготовка сообщений",
+    sorting: "Сортировка",
   };
 
   const phaseText = phaseMap[payload.phase] || "Обработка";
@@ -317,9 +396,10 @@ function hydrateConversation(payload) {
   state.worker = null;
 
   state.messages = Array.isArray(payload.messages) ? payload.messages : [];
-  state.searchCorpus = state.messages.map((message) =>
-    String(message.text || "").toLowerCase(),
-  );
+  state.searchCorpus = state.messages.map((message) => {
+    const corpusSource = message?.searchText ?? message?.text ?? "";
+    return String(corpusSource).toLowerCase();
+  });
   state.allIndexes = Array.from({ length: state.messages.length }, (_, index) => index);
   state.searchResults = [];
   state.activeSearchResult = -1;
@@ -335,10 +415,10 @@ function hydrateConversation(payload) {
   state.previousSearchQuery = "";
 
   if (!state.messages.length) {
-    setStatus("Файл загружен, но сообщений не найдено.", 1);
+    setStatus("Источник загружен, но сообщений не найдено.", 1);
     dom.searchStatus.textContent = "Совпадений: 0";
-    dom.chatMeta.textContent = "Нет сообщений в загруженном файле";
-    setEmptyState("В файле нет сообщений.");
+    dom.chatMeta.textContent = "Нет сообщений в загруженном источнике";
+    setEmptyState("В источнике нет сообщений.");
     return;
   }
 
@@ -357,14 +437,14 @@ function hydrateConversation(payload) {
 
   const profileMap = new Map(
     (Array.isArray(payload.profiles) ? payload.profiles : []).map((profile) => [
-      Number(profile.id),
+      String(profile.id),
       profile.name,
     ]),
   );
 
   const participantNames = participants
     .slice(0, 2)
-    .map((id) => profileMap.get(Number(id)) || `ID ${id}`)
+    .map((id) => profileMap.get(String(id)) || `ID ${id}`)
     .join(" / ");
 
   const fromTime = state.messages[0]?.timestamp;
@@ -395,6 +475,14 @@ function resetConversationState() {
     state.searchDebounceId = null;
   }
 
+  if (state.assetUrlCache instanceof Map) {
+    for (const url of state.assetUrlCache.values()) {
+      if (typeof url === "string" && url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
+    }
+  }
+
   state.messages = [];
   state.searchCorpus = [];
   state.allIndexes = [];
@@ -416,6 +504,8 @@ function resetConversationState() {
   state.renderedEnd = -1;
   state.measureQueued = false;
   state.rightSideId = null;
+  state.assetFiles = null;
+  state.assetUrlCache = null;
 
   dom.chatCanvas.replaceChildren();
   dom.searchInput.disabled = true;
@@ -492,11 +582,23 @@ function renderVisibleMessages(force = false) {
 
     meta.append(senderNode, timeNode);
 
-    const text = document.createElement("div");
-    text.className = "message-text";
-    appendHighlightedText(text, String(message.text || ""), state.searchQuery);
+    bubble.append(meta);
 
-    bubble.append(meta, text);
+    const displayText = String(message.text || "");
+    if (displayText) {
+      const text = document.createElement("div");
+      text.className = "message-text";
+      appendHighlightedText(text, displayText, state.searchQuery);
+      bubble.appendChild(text);
+    }
+
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments
+      : [];
+    if (attachments.length) {
+      bubble.appendChild(renderAttachments(attachments));
+    }
+
     row.appendChild(bubble);
     fragment.appendChild(row);
   }
@@ -817,8 +919,9 @@ function renderSearchSuggestions(force = false) {
     const textNode = document.createElement("div");
     textNode.className = "search-suggestion-text";
 
+    const previewSource = String(message.searchText ?? message.text ?? "");
     const previewText = buildSearchPreview(
-      String(message.text || ""),
+      previewSource,
       state.searchQuery,
     );
     appendHighlightedText(textNode, previewText, state.searchQuery);
@@ -1203,4 +1306,170 @@ function getErrorMessage(error) {
   }
 
   return String(error);
+}
+
+function inferDirectoryLabel(files) {
+  const first = files.find((file) => typeof file?.webkitRelativePath === "string");
+  const path = first?.webkitRelativePath || "";
+  const firstSegment = path.split("/")[0];
+  return firstSegment || "папка";
+}
+
+function prepareDirectoryEntries(files) {
+  const firstPath = files.find((file) => typeof file?.webkitRelativePath === "string")
+    ?.webkitRelativePath;
+  const rootPrefix =
+    typeof firstPath === "string" && firstPath.includes("/")
+      ? `${firstPath.split("/")[0]}/`
+      : "";
+
+  const entries = [];
+  const assetFiles = new Map();
+
+  for (const file of files) {
+    let relativePath = file.webkitRelativePath || file.name;
+    if (rootPrefix && relativePath.startsWith(rootPrefix)) {
+      relativePath = relativePath.slice(rootPrefix.length);
+    }
+    relativePath = normalizeRelPath(relativePath);
+
+    entries.push({ file, relativePath });
+
+    if (!/\.html?$/i.test(file.name)) {
+      assetFiles.set(relativePath, file);
+    }
+  }
+
+  return { entries, assetFiles };
+}
+
+function normalizeRelPath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/{2,}/g, "/")
+    .trim();
+}
+
+function isProbablyAbsoluteUrl(value) {
+  return /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(value);
+}
+
+function resolveMediaUrl(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!url) {
+    return "";
+  }
+
+  if (isProbablyAbsoluteUrl(url)) {
+    return url;
+  }
+
+  const key = normalizeRelPath(url.split("#")[0].split("?")[0]);
+  const file = state.assetFiles instanceof Map ? state.assetFiles.get(key) : null;
+  if (!file) {
+    return url;
+  }
+
+  if (!(state.assetUrlCache instanceof Map)) {
+    state.assetUrlCache = new Map();
+  }
+
+  const cached = state.assetUrlCache.get(key);
+  if (typeof cached === "string") {
+    return cached;
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  state.assetUrlCache.set(key, objectUrl);
+  return objectUrl;
+}
+
+function renderAttachments(attachments) {
+  const wrap = document.createElement("div");
+  wrap.className = "message-attachments";
+
+  for (const attachment of attachments) {
+    const type = String(attachment?.type || "");
+    const title = String(attachment?.title || "").trim();
+
+    if (type === "image") {
+      const full = resolveMediaUrl(attachment.url);
+      const thumb = resolveMediaUrl(attachment.thumbUrl || attachment.url);
+      if (!full && !thumb) {
+        continue;
+      }
+
+      const link = document.createElement("a");
+      link.className = "attachment-link";
+      link.href = full || thumb;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+
+      const img = document.createElement("img");
+      img.className = "attachment-image";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = title || "Изображение";
+      img.src = thumb || full;
+      img.addEventListener("load", () => scheduleMeasurement(), { once: true });
+
+      link.appendChild(img);
+      wrap.appendChild(link);
+      continue;
+    }
+
+    if (type === "video") {
+      const src = resolveMediaUrl(attachment.url);
+      if (!src) {
+        continue;
+      }
+      const poster = resolveMediaUrl(attachment.thumbUrl || "");
+
+      const video = document.createElement("video");
+      video.className = "attachment-video";
+      video.controls = true;
+      video.preload = "metadata";
+      video.src = src;
+      if (poster) {
+        video.poster = poster;
+      }
+      video.addEventListener("loadedmetadata", () => scheduleMeasurement(), { once: true });
+      wrap.appendChild(video);
+      continue;
+    }
+
+    if (type === "audio") {
+      const src = resolveMediaUrl(attachment.url);
+      if (!src) {
+        continue;
+      }
+      const audio = document.createElement("audio");
+      audio.className = "attachment-audio";
+      audio.controls = true;
+      audio.preload = "metadata";
+      audio.src = src;
+      audio.addEventListener("loadedmetadata", () => scheduleMeasurement(), { once: true });
+      wrap.appendChild(audio);
+      continue;
+    }
+
+    if (type === "link" || type === "document") {
+      const href = resolveMediaUrl(attachment.url);
+      if (!href) {
+        continue;
+      }
+      const link = document.createElement("a");
+      link.className = "attachment-file";
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = title || attachment.url || "Файл";
+      wrap.appendChild(link);
+      continue;
+    }
+  }
+
+  return wrap;
 }

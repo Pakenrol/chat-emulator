@@ -88,6 +88,10 @@ body {
   transition: transform 0.15s ease;
 }
 
+.file-button-secondary {
+  background: #2f6f73;
+}
+
 .file-button:hover {
   transform: translateY(-1px);
 }
@@ -360,6 +364,53 @@ button:disabled {
   background: var(--match-active);
   border-radius: 3px;
   padding: 0 1px;
+}
+
+.message-attachments {
+  margin-top: 0.45rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.attachment-link {
+  display: inline-flex;
+  max-width: 100%;
+  text-decoration: none;
+}
+
+.attachment-image,
+.attachment-video {
+  display: block;
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.attachment-image {
+  height: auto;
+  max-height: min(56vh, 420px);
+  object-fit: contain;
+}
+
+.attachment-video {
+  width: min(520px, 100%);
+  max-height: min(56vh, 520px);
+  background: #0d0f10;
+}
+
+.attachment-audio {
+  width: min(420px, 100%);
+}
+
+.attachment-file {
+  color: #0d4a5a;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.attachment-file:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 720px) {

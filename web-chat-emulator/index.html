@@ -13,8 +13,8 @@
         <div>
           <h1>Chat Emulator</h1>
           <p>
-            Загрузите экспорт диалога в JSON и откройте переписку с поиском по
-            сообщениям.
+            Загрузите экспорт диалога (JSON или папку с HTML‑историей) и откройте
+            переписку с поиском по сообщениям.
           </p>
         </div>
       </header>
@@ -22,11 +22,22 @@
       <section class="controls card">
         <div class="upload-row">
           <label class="file-button" for="fileInput">
-            Выбрать файл
+            Выбрать JSON
             <input
               id="fileInput"
               type="file"
               accept=".json,.js,application/json,text/javascript"
+            />
+          </label>
+
+          <label class="file-button file-button-secondary" for="folderInput">
+            Выбрать папку (HTML)
+            <input
+              id="folderInput"
+              type="file"
+              webkitdirectory
+              directory
+              multiple
             />
           </label>
         </div>
@@ -35,7 +46,7 @@
           <div class="progress-track" aria-hidden="true">
             <div id="progressBar" class="progress-bar"></div>
           </div>
-          <div id="loadStatus" class="load-status">Файл не загружен</div>
+          <div id="loadStatus" class="load-status">Источник не загружен</div>
         </div>
 
         <div id="chatMeta" class="chat-meta">Нет активного диалога</div>
@@ -77,7 +88,7 @@
         <div id="chatViewport" class="chat-viewport">
           <div id="chatCanvas" class="chat-canvas"></div>
           <div id="emptyState" class="empty-state">
-            Загрузите JSON, чтобы увидеть переписку.
+            Загрузите JSON или папку с HTML, чтобы увидеть переписку.
           </div>
         </div>
       </section>

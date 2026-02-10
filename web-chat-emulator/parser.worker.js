@@ -10,112 +10,30 @@ const ATTACHMENT_LABELS = {
   gift: "[подарок]",
 };
 
+const HTML_ATTACHMENT_LABELS = {
+  image: "[фото]",
+  video: "[видео]",
+  audio: "[аудио]",
+  document: "[документ]",
+  link: "[ссылка]",
+};
+
 self.onmessage = async (event) => {
   const payload = event.data;
-  if (!payload || payload.type !== "parse-file") {
-    return;
-  }
-
-  const file = payload.file;
-  if (!(file instanceof File)) {
-    postMessage({ type: "error", message: "Некорректный файл" });
+  if (!payload || typeof payload !== "object") {
     return;
   }
 
   try {
-    postMessage({ type: "progress", phase: "reading", progress: 0.05 });
-    const rawSource = await file.text();
-
-    postMessage({ type: "progress", phase: "parsing", progress: 0.3 });
-    const parsed = parseDialogPayload(rawSource);
-
-    const sourceMessages = Array.isArray(parsed.messages) ? parsed.messages : [];
-    const sourceProfiles = Array.isArray(parsed.profiles)
-      ? parsed.profiles
-      : Array.isArray(parsed.users)
-        ? parsed.users
-        : [];
-
-    const profiles = normalizeProfiles(sourceProfiles);
-    const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
-
-    const participantCounter = new Map();
-    const normalizedMessages = new Array(sourceMessages.length);
-    const totalMessages = Math.max(1, sourceMessages.length);
-
-    let normalizedIndex = 0;
-
-    for (let sourceIndex = sourceMessages.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
-      const message = sourceMessages[sourceIndex] || {};
-      const from = numberOrNull(message.from);
-      const sender = resolveSenderName(from, profileMap);
-
-      participantCounter.set(from, (participantCounter.get(from) || 0) + 1);
-
-      const plainText = collapseWhitespace(extractText(message.text));
-      const attachmentText = summarizeAttachments(message.attachments);
-      const forwardedText = summarizeForwarded(message.fwd);
-      const replyLabel = message.reply ? `[ответ на #${message.reply}]` : "";
-
-      const lines = [];
-      if (replyLabel) {
-        lines.push(replyLabel);
-      }
-      if (plainText) {
-        lines.push(plainText);
-      }
-      if (attachmentText) {
-        lines.push(attachmentText);
-      }
-      if (forwardedText) {
-        lines.push(forwardedText);
-      }
-
-      let text = lines.join("\n").trim();
-      if (!text) {
-        text = "[пустое сообщение]";
-      }
-
-      normalizedMessages[normalizedIndex] = {
-        id: numberOrNull(message.id),
-        from,
-        sender,
-        timestamp: normalizeTimestamp(message.time),
-        text,
-      };
-
-      normalizedIndex += 1;
-
-      if (normalizedIndex % 3000 === 0) {
-        const progress = 0.35 + (normalizedIndex / totalMessages) * 0.6;
-        postMessage({
-          type: "progress",
-          phase: "normalizing",
-          progress: Math.min(progress, 0.96),
-        });
-      }
+    if (payload.type === "parse-file") {
+      await parseJsonFile(payload.file);
+      return;
     }
 
-    const participants = Array.from(participantCounter.entries())
-      .sort((left, right) => right[1] - left[1])
-      .map(([id]) => id)
-      .filter((id) => id !== null)
-      .slice(0, 2);
-
-    const startTimestamp = normalizedMessages[0]?.timestamp ?? null;
-    const endTimestamp = normalizedMessages[normalizedMessages.length - 1]?.timestamp ?? null;
-
-    postMessage({
-      type: "ready",
-      messages: normalizedMessages,
-      profiles,
-      participants,
-      stats: {
-        messageCount: normalizedMessages.length,
-        from: startTimestamp,
-        to: endTimestamp,
-      },
-    });
+    if (payload.type === "parse-html-directory") {
+      await parseHtmlDirectory(payload.entries);
+      return;
+    }
   } catch (error) {
     postMessage({
       type: "error",
@@ -123,6 +41,648 @@ self.onmessage = async (event) => {
     });
   }
 };
+
+async function parseJsonFile(file) {
+  if (!(file instanceof File)) {
+    throw new Error("Некорректный файл");
+  }
+
+  postMessage({ type: "progress", phase: "reading", progress: 0.05, format: "json" });
+  const rawSource = await file.text();
+
+  postMessage({ type: "progress", phase: "parsing", progress: 0.3, format: "json" });
+  const parsed = parseDialogPayload(rawSource);
+
+  const sourceMessages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  const sourceProfiles = Array.isArray(parsed.profiles)
+    ? parsed.profiles
+    : Array.isArray(parsed.users)
+      ? parsed.users
+      : [];
+
+  const profiles = normalizeProfiles(sourceProfiles);
+  const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
+
+  const participantCounter = new Map();
+  const normalizedMessages = new Array(sourceMessages.length);
+  const totalMessages = Math.max(1, sourceMessages.length);
+
+  let normalizedIndex = 0;
+
+  for (let sourceIndex = sourceMessages.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
+    const message = sourceMessages[sourceIndex] || {};
+    const fromNumber = numberOrNull(message.from);
+    const from = fromNumber === null ? null : String(fromNumber);
+    const sender = resolveSenderName(from, profileMap);
+
+    if (from !== null) {
+      participantCounter.set(from, (participantCounter.get(from) || 0) + 1);
+    }
+
+    const plainText = collapseWhitespace(extractText(message.text));
+    const attachmentText = summarizeAttachments(message.attachments);
+    const forwardedText = summarizeForwarded(message.fwd);
+    const replyLabel = message.reply ? `[ответ на #${message.reply}]` : "";
+
+    const lines = [];
+    if (replyLabel) {
+      lines.push(replyLabel);
+    }
+    if (plainText) {
+      lines.push(plainText);
+    }
+    if (attachmentText) {
+      lines.push(attachmentText);
+    }
+    if (forwardedText) {
+      lines.push(forwardedText);
+    }
+
+    let text = lines.join("\n").trim();
+    if (!text) {
+      text = "[пустое сообщение]";
+    }
+
+    normalizedMessages[normalizedIndex] = {
+      id: numberOrNull(message.id),
+      from,
+      sender,
+      timestamp: normalizeTimestamp(message.time),
+      text,
+      searchText: text,
+      attachments: [],
+    };
+
+    normalizedIndex += 1;
+
+    if (normalizedIndex % 3000 === 0) {
+      const progress = 0.35 + (normalizedIndex / totalMessages) * 0.6;
+      postMessage({
+        type: "progress",
+        phase: "normalizing",
+        progress: Math.min(progress, 0.96),
+        format: "json",
+      });
+    }
+  }
+
+  const participants = Array.from(participantCounter.entries())
+    .sort((left, right) => right[1] - left[1])
+    .map(([id]) => id)
+    .slice(0, 2);
+
+  const startTimestamp = normalizedMessages[0]?.timestamp ?? null;
+  const endTimestamp = normalizedMessages[normalizedMessages.length - 1]?.timestamp ?? null;
+
+  postMessage({
+    type: "ready",
+    messages: normalizedMessages,
+    profiles,
+    participants,
+    stats: {
+      messageCount: normalizedMessages.length,
+      from: startTimestamp,
+      to: endTimestamp,
+    },
+  });
+}
+
+async function parseHtmlDirectory(entries) {
+  if (!Array.isArray(entries) || !entries.length) {
+    throw new Error("Папка пуста или файлы недоступны");
+  }
+
+  postMessage({ type: "progress", phase: "scanning", progress: 0.05, format: "html" });
+
+  const htmlEntries = entries
+    .map((entry) => {
+      const file = entry?.file;
+      if (!(file instanceof File)) {
+        return null;
+      }
+
+      const relativePath = typeof entry?.relativePath === "string" ? entry.relativePath : file.name;
+      if (!/\.html?$/i.test(file.name)) {
+        return null;
+      }
+
+      return { file, relativePath };
+    })
+    .filter(Boolean);
+
+  if (!htmlEntries.length) {
+    throw new Error("В папке нет HTML файлов");
+  }
+
+  const historyEntries = htmlEntries.filter((entry) =>
+    /^history_\d+\.html?$/i.test(basename(entry.relativePath)),
+  );
+  const chosenEntries = historyEntries.length ? historyEntries : htmlEntries;
+
+  chosenEntries.sort((left, right) => {
+    const leftIndex = extractHistoryIndex(left.relativePath);
+    const rightIndex = extractHistoryIndex(right.relativePath);
+    if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+
+    return left.relativePath.localeCompare(right.relativePath, "ru");
+  });
+
+  if (typeof DOMParser === "undefined") {
+    throw new Error(
+      "DOMParser недоступен. Откройте приложение в современном браузере (Chrome/Edge).",
+    );
+  }
+
+  const parser = new DOMParser();
+  const profilesById = new Map();
+  const participantCounter = new Map();
+  const messages = [];
+
+  let globalOrder = 0;
+  const totalFiles = Math.max(1, chosenEntries.length);
+
+  for (let index = 0; index < chosenEntries.length; index += 1) {
+    const entry = chosenEntries[index];
+    const file = entry.file;
+    const relativePath = entry.relativePath;
+
+    const progressBase = 0.08 + (index / totalFiles) * 0.82;
+    postMessage({ type: "progress", phase: "reading", progress: progressBase, format: "html" });
+
+    const raw = await file.text();
+
+    postMessage({
+      type: "progress",
+      phase: "parsing",
+      progress: Math.min(0.12 + (index / totalFiles) * 0.82, 0.95),
+      format: "html",
+    });
+
+    const baseDir = dirname(relativePath);
+    const parsedMessages = parseVkDumperHistoryHtml(parser, raw, baseDir);
+
+    for (const msg of parsedMessages) {
+      msg.__order = globalOrder;
+      globalOrder += 1;
+
+      const from = msg.from;
+      if (from !== null) {
+        participantCounter.set(from, (participantCounter.get(from) || 0) + 1);
+      }
+
+      const profileId = msg.from;
+      if (profileId !== null && !profilesById.has(profileId)) {
+        profilesById.set(profileId, {
+          id: profileId,
+          name: msg.sender || `ID ${profileId}`,
+          photo: msg.avatar || "",
+        });
+      } else if (profileId !== null) {
+        const existing = profilesById.get(profileId);
+        if (existing && !existing.photo && msg.avatar) {
+          existing.photo = msg.avatar;
+        }
+      }
+
+      messages.push(msg);
+    }
+  }
+
+  postMessage({ type: "progress", phase: "sorting", progress: 0.96, format: "html" });
+
+  messages.sort((left, right) => {
+    const leftTime = Number.isFinite(left.timestamp) ? left.timestamp : Infinity;
+    const rightTime = Number.isFinite(right.timestamp) ? right.timestamp : Infinity;
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+
+    return (left.__order || 0) - (right.__order || 0);
+  });
+
+  for (let i = 0; i < messages.length; i += 1) {
+    messages[i].id = i + 1;
+    delete messages[i].__order;
+  }
+
+  const participants = Array.from(participantCounter.entries())
+    .sort((left, right) => right[1] - left[1])
+    .map(([id]) => id)
+    .slice(0, 2);
+
+  const fromTimestamp = messages.length ? messages[0]?.timestamp ?? null : null;
+  const toTimestamp = messages.length ? messages[messages.length - 1]?.timestamp ?? null : null;
+
+  postMessage({
+    type: "ready",
+    messages,
+    profiles: Array.from(profilesById.values()),
+    participants,
+    stats: {
+      messageCount: messages.length,
+      from: fromTimestamp,
+      to: toTimestamp,
+    },
+  });
+}
+
+function parseVkDumperHistoryHtml(parser, rawSource, baseDir) {
+  const cleaned = String(rawSource || "").replace(/^\uFEFF/, "");
+  const doc = parser.parseFromString(cleaned, "text/html");
+
+  const nodes = Array.from(doc.querySelectorAll("div.im_in, div.im_out"));
+  const messages = [];
+
+  for (const node of nodes) {
+    const senderAnchor =
+      node.querySelector(".im_log_author_chat_name a.mem_link") ||
+      node.querySelector(".im_log_author_chat_name a") ||
+      node.querySelector(".im_log_author_chat_thumb a");
+
+    const senderHref = senderAnchor?.getAttribute("href") || "";
+    const senderName = collapseWhitespace(senderAnchor?.textContent || "") || "Unknown";
+    const senderId = extractVkProfileId(senderHref) || `name:${senderName}`;
+
+    const avatarUrl =
+      node.querySelector(".im_log_author_chat_thumb img")?.getAttribute("src") || "";
+
+    const dateText = collapseWhitespace(
+      node.querySelector(".im_log_date .im_date_link")?.textContent || "",
+    );
+    const timestamp = parseVkDateTime(dateText);
+
+    const wrapped = node.querySelector(".im_log_body .wrapped");
+    const gallery = wrapped?.querySelector(".gallery.attachment") || null;
+    const attachments = gallery
+      ? parseVkGalleryAttachments(gallery, baseDir)
+      : [];
+
+    let text = "";
+    if (wrapped) {
+      const clone = wrapped.cloneNode(true);
+      clone.querySelectorAll(".im_log_author_chat_name").forEach((el) => el.remove());
+      clone.querySelectorAll(".gallery.attachment").forEach((el) => el.remove());
+      text = normalizeMultilineText(clone.textContent || "");
+    }
+
+    const hasText = Boolean(text);
+    const searchText = buildHtmlSearchText(text, attachments);
+
+    messages.push({
+      id: null,
+      from: senderId,
+      sender: senderName,
+      avatar: avatarUrl,
+      timestamp,
+      text: hasText ? text : attachments.length ? "" : "[пустое сообщение]",
+      searchText,
+      attachments,
+    });
+  }
+
+  return messages;
+}
+
+function parseVkGalleryAttachments(gallery, baseDir) {
+  const attachments = [];
+  const seen = new Set();
+
+  for (const audio of gallery.querySelectorAll("audio")) {
+    const source =
+      audio.querySelector("source[src]")?.getAttribute("src") ||
+      audio.getAttribute("src") ||
+      "";
+    const url = normalizeMediaRef(source, baseDir);
+    if (!url) {
+      continue;
+    }
+
+    const key = `audio:${url}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    attachments.push({ type: "audio", url, title: "" });
+  }
+
+  for (const video of gallery.querySelectorAll("video")) {
+    const source =
+      video.querySelector("source[src]")?.getAttribute("src") ||
+      video.getAttribute("src") ||
+      "";
+    const url = normalizeMediaRef(source, baseDir);
+    if (!url) {
+      continue;
+    }
+
+    const key = `video:${url}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    attachments.push({ type: "video", url, title: "" });
+  }
+
+  for (const link of gallery.querySelectorAll("a[href]")) {
+    const hrefRaw = link.getAttribute("href") || "";
+    const href = normalizeMediaRef(hrefRaw, baseDir);
+    if (!href) {
+      continue;
+    }
+
+    const img = link.querySelector("img[src]");
+    const title = normalizeMultilineText(link.textContent || "");
+
+    if (img) {
+      const thumb = normalizeMediaRef(img.getAttribute("src") || "", baseDir);
+      const inferred = detectMediaTypeFromUrl(hrefRaw);
+      const type = inferred === "video" ? "video" : "image";
+
+      const key = `${type}:${href}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      attachments.push({
+        type,
+        url: href,
+        thumbUrl: thumb || "",
+        title: "",
+      });
+      continue;
+    }
+
+    const type = looksLikeDocument(title, hrefRaw) ? "document" : "link";
+    const key = `${type}:${href}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    attachments.push({
+      type,
+      url: href,
+      title: title || href,
+    });
+  }
+
+  for (const img of gallery.querySelectorAll("img[src]")) {
+    if (img.closest("a[href]")) {
+      continue;
+    }
+
+    const url = normalizeMediaRef(img.getAttribute("src") || "", baseDir);
+    if (!url) {
+      continue;
+    }
+
+    const key = `image:${url}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    attachments.push({ type: "image", url, title: "" });
+  }
+
+  return attachments;
+}
+
+function buildHtmlSearchText(text, attachments) {
+  const parts = [];
+
+  const normalizedText = normalizeMultilineText(text);
+  if (normalizedText) {
+    parts.push(normalizedText);
+  }
+
+  if (Array.isArray(attachments) && attachments.length) {
+    const counters = new Map();
+    const titles = [];
+
+    for (const item of attachments) {
+      const type = typeof item?.type === "string" ? item.type : "link";
+      counters.set(type, (counters.get(type) || 0) + 1);
+
+      if (type === "document" && typeof item.title === "string" && item.title.trim()) {
+        titles.push(item.title.trim());
+      }
+    }
+
+    const summary = [];
+    for (const [type, count] of counters.entries()) {
+      const label = HTML_ATTACHMENT_LABELS[type] || `[${type}]`;
+      summary.push(count > 1 ? `${label} x${count}` : label);
+    }
+
+    if (summary.length) {
+      parts.push(summary.join(" "));
+    }
+
+    if (titles.length) {
+      parts.push(titles.slice(0, 3).join(" | "));
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+function detectMediaTypeFromUrl(url) {
+  const normalized = String(url || "").toLowerCase();
+  if (/\.(mp4|webm|mkv)(?:$|[?#])/.test(normalized)) {
+    return "video";
+  }
+  if (/\.(mp3|ogg|m4a|wav)(?:$|[?#])/.test(normalized)) {
+    return "audio";
+  }
+  if (/\.(png|jpe?g|gif|webp|bmp)(?:$|[?#])/.test(normalized)) {
+    return "image";
+  }
+  return "link";
+}
+
+function looksLikeDocument(title, href) {
+  const lowerTitle = String(title || "").toLowerCase();
+  const lowerHref = String(href || "").toLowerCase();
+  if (lowerHref.includes("vk.com/doc")) {
+    return true;
+  }
+  return /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z)(?:$|[?#])/.test(lowerTitle);
+}
+
+function normalizeMediaRef(rawUrl, baseDir) {
+  let value = String(rawUrl || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  if (value.startsWith("//")) {
+    return `https:${value}`;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    return value;
+  }
+
+  value = value.replace(/\\/g, "/");
+  const withoutHash = value.split("#")[0];
+  const [pathPart, query] = withoutHash.split("?");
+  const resolved = normalizePath(joinPath(baseDir, pathPart));
+  if (!resolved) {
+    return "";
+  }
+
+  return query ? `${resolved}?${query}` : resolved;
+}
+
+function parseVkDateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const match = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const hours = Number(match[4]);
+  const minutes = Number(match[5]);
+
+  if (
+    !Number.isFinite(day) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(year) ||
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes)
+  ) {
+    return null;
+  }
+
+  const date = new Date(year, month - 1, day, hours, minutes);
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function extractHistoryIndex(path) {
+  const match = basename(path).match(/^history_(\d+)\.html?$/i);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractVkProfileId(href) {
+  const raw = String(href || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const matchId = raw.match(/vk\.com\/id(\d+)/i);
+  if (matchId) {
+    return matchId[1];
+  }
+
+  const matchClub = raw.match(/vk\.com\/club(\d+)/i);
+  if (matchClub) {
+    return `-${matchClub[1]}`;
+  }
+
+  const matchPublic = raw.match(/vk\.com\/public(\d+)/i);
+  if (matchPublic) {
+    return `-${matchPublic[1]}`;
+  }
+
+  const matchUsername = raw.match(/vk\.com\/([^/?#]+)/i);
+  return matchUsername ? matchUsername[1] : "";
+}
+
+function normalizeMultilineText(value) {
+  const normalized = String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .join("\n")
+    .trim();
+}
+
+function joinPath(baseDir, relative) {
+  const base = String(baseDir || "").replace(/\\/g, "/");
+  const rel = String(relative || "").replace(/\\/g, "/");
+  if (!base) {
+    return rel;
+  }
+  if (!rel) {
+    return base;
+  }
+  if (rel.startsWith("/")) {
+    return rel;
+  }
+  if (base.endsWith("/")) {
+    return `${base}${rel}`;
+  }
+  return `${base}/${rel}`;
+}
+
+function normalizePath(value) {
+  const raw = String(value || "").replace(/\\/g, "/").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const leadingSlash = raw.startsWith("/");
+  const segments = raw.split("/").filter(Boolean);
+  const stack = [];
+
+  for (const segment of segments) {
+    if (segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      if (stack.length) {
+        stack.pop();
+      }
+      continue;
+    }
+    stack.push(segment);
+  }
+
+  const joined = stack.join("/");
+  return leadingSlash ? `/${joined}` : joined;
+}
+
+function basename(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] || "";
+}
+
+function dirname(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  if (idx === -1) {
+    return "";
+  }
+  return normalized.slice(0, idx + 1);
+}
 
 function parseDialogPayload(rawSource) {
   const cleaned = String(rawSource || "").replace(/^\uFEFF/, "").trim();
@@ -168,11 +728,12 @@ function parseDialogPayload(rawSource) {
 function normalizeProfiles(rawProfiles) {
   return rawProfiles
     .map((profile) => {
-      const id = numberOrNull(profile?.id);
-      if (id === null) {
+      const idNumber = numberOrNull(profile?.id);
+      if (idNumber === null) {
         return null;
       }
 
+      const id = String(idNumber);
       const firstName = String(profile.firstName || "").trim();
       const lastName = String(profile.lastName || "").trim();
       const name = `${firstName} ${lastName}`.trim() || `ID ${id}`;
@@ -334,3 +895,4 @@ function dedupe(list) {
 
   return unique;
 }
+
