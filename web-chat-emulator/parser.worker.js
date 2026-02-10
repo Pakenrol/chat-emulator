@@ -189,13 +189,6 @@ async function parseHtmlDirectory(entries) {
     return left.relativePath.localeCompare(right.relativePath, "ru");
   });
 
-  if (typeof DOMParser === "undefined") {
-    throw new Error(
-      "DOMParser недоступен. Откройте приложение в современном браузере (Chrome/Edge).",
-    );
-  }
-
-  const parser = new DOMParser();
   const profilesById = new Map();
   const participantCounter = new Map();
   const messages = [];
@@ -221,7 +214,7 @@ async function parseHtmlDirectory(entries) {
     });
 
     const baseDir = dirname(relativePath);
-    const parsedMessages = parseVkDumperHistoryHtml(parser, raw, baseDir);
+    const parsedMessages = parseVkDumperHistoryHtml(raw, baseDir);
 
     for (const msg of parsedMessages) {
       msg.__order = globalOrder;
@@ -288,45 +281,27 @@ async function parseHtmlDirectory(entries) {
   });
 }
 
-function parseVkDumperHistoryHtml(parser, rawSource, baseDir) {
+function parseVkDumperHistoryHtml(rawSource, baseDir) {
   const cleaned = String(rawSource || "").replace(/^\uFEFF/, "");
-  const doc = parser.parseFromString(cleaned, "text/html");
-
-  const nodes = Array.from(doc.querySelectorAll("div.im_in, div.im_out"));
+  const blocks = splitVkHistoryMessageBlocks(cleaned);
   const messages = [];
 
-  for (const node of nodes) {
-    const senderAnchor =
-      node.querySelector(".im_log_author_chat_name a.mem_link") ||
-      node.querySelector(".im_log_author_chat_name a") ||
-      node.querySelector(".im_log_author_chat_thumb a");
+  for (const block of blocks) {
+    const sender = extractVkSenderInfo(block);
+    const senderName = sender.name || "Unknown";
+    const senderId = sender.id || `name:${senderName}`;
 
-    const senderHref = senderAnchor?.getAttribute("href") || "";
-    const senderName = collapseWhitespace(senderAnchor?.textContent || "") || "Unknown";
-    const senderId = extractVkProfileId(senderHref) || `name:${senderName}`;
-
-    const avatarUrl =
-      node.querySelector(".im_log_author_chat_thumb img")?.getAttribute("src") || "";
-
-    const dateText = collapseWhitespace(
-      node.querySelector(".im_log_date .im_date_link")?.textContent || "",
-    );
+    const avatarUrl = extractVkAvatarUrl(block);
+    const dateText = extractVkDateText(block);
     const timestamp = parseVkDateTime(dateText);
 
-    const wrapped = node.querySelector(".im_log_body .wrapped");
-    const gallery = wrapped?.querySelector(".gallery.attachment") || null;
-    const attachments = gallery
-      ? parseVkGalleryAttachments(gallery, baseDir)
+    const gallery = extractGalleryBlock(block);
+    const galleryInnerHtml = gallery?.innerHtml || "";
+    const attachments = galleryInnerHtml
+      ? parseVkGalleryAttachments(galleryInnerHtml, baseDir)
       : [];
 
-    let text = "";
-    if (wrapped) {
-      const clone = wrapped.cloneNode(true);
-      clone.querySelectorAll(".im_log_author_chat_name").forEach((el) => el.remove());
-      clone.querySelectorAll(".gallery.attachment").forEach((el) => el.remove());
-      text = normalizeMultilineText(clone.textContent || "");
-    }
-
+    const text = extractVkMessageText(block, gallery?.startIndex ?? -1);
     const hasText = Boolean(text);
     const searchText = buildHtmlSearchText(text, attachments);
 
@@ -345,112 +320,338 @@ function parseVkDumperHistoryHtml(parser, rawSource, baseDir) {
   return messages;
 }
 
-function parseVkGalleryAttachments(gallery, baseDir) {
+function splitVkHistoryMessageBlocks(html) {
+  const blocks = [];
+  const source = String(html || "");
+  const starts = [];
+  const pattern = /<div class="im_(?:in|out)">/g;
+  let match = pattern.exec(source);
+
+  while (match) {
+    starts.push(match.index);
+    match = pattern.exec(source);
+  }
+
+  if (!starts.length) {
+    return blocks;
+  }
+
+  for (let i = 0; i < starts.length; i += 1) {
+    const start = starts[i];
+    const end = i + 1 < starts.length ? starts[i + 1] : source.length;
+    blocks.push(source.slice(start, end));
+  }
+
+  return blocks;
+}
+
+function extractVkSenderInfo(html) {
+  const source = String(html || "");
+
+  const nameMatch = source.match(
+    /<div class="im_log_author_chat_name"><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i,
+  );
+
+  const href = nameMatch ? String(nameMatch[1] || "") : "";
+  const rawName = nameMatch ? String(nameMatch[2] || "") : "";
+  const name = collapseWhitespace(decodeHtmlEntities(stripTags(rawName))) || "";
+  const id = extractVkProfileId(href) || "";
+
+  if (href || name) {
+    return { href, name, id };
+  }
+
+  const thumbMatch = source.match(/<div class="im_log_author_chat_thumb"><a[^>]*href="([^"]+)"/i);
+  const thumbHref = thumbMatch ? String(thumbMatch[1] || "") : "";
+  return { href: thumbHref, name: "", id: extractVkProfileId(thumbHref) || "" };
+}
+
+function extractVkAvatarUrl(html) {
+  const source = String(html || "");
+  const match = source.match(
+    /<div class="im_log_author_chat_thumb">[\s\S]*?<img[^>]*src="([^"]+)"/i,
+  );
+  return match ? String(match[1] || "") : "";
+}
+
+function extractVkDateText(html) {
+  const source = String(html || "");
+  const match = source.match(/<a class="im_date_link">([\s\S]*?)<\/a>/i);
+  return collapseWhitespace(decodeHtmlEntities(stripTags(match ? match[1] : "")));
+}
+
+function extractGalleryBlock(html) {
+  const source = String(html || "");
+  const startIndex = source.indexOf('<div class="gallery attachment">');
+  if (startIndex === -1) {
+    return null;
+  }
+
+  const divBlock = extractDivBlock(source, startIndex);
+  if (!divBlock) {
+    return null;
+  }
+
+  return { startIndex, innerHtml: divBlock.innerHtml };
+}
+
+function extractDivBlock(source, startIndex) {
+  const startTagEnd = source.indexOf(">", startIndex);
+  if (startTagEnd === -1) {
+    return null;
+  }
+
+  let depth = 1;
+  let cursor = startTagEnd + 1;
+
+  while (depth > 0) {
+    const nextOpen = source.indexOf("<div", cursor);
+    const nextClose = source.indexOf("</div", cursor);
+
+    if (nextClose === -1) {
+      return null;
+    }
+
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth += 1;
+      cursor = nextOpen + 4;
+      continue;
+    }
+
+    depth -= 1;
+    const closeTagEnd = source.indexOf(">", nextClose);
+    if (closeTagEnd === -1) {
+      return null;
+    }
+
+    if (depth === 0) {
+      return {
+        innerHtml: source.slice(startTagEnd + 1, nextClose),
+        endIndex: closeTagEnd + 1,
+      };
+    }
+
+    cursor = closeTagEnd + 1;
+  }
+
+  return null;
+}
+
+function extractVkMessageText(html, galleryStartIndex) {
+  const source = String(html || "");
+
+  const nameStart = source.indexOf('<div class="im_log_author_chat_name">');
+  if (nameStart === -1) {
+    return "";
+  }
+
+  const nameEnd = source.indexOf("</div>", nameStart);
+  if (nameEnd === -1) {
+    return "";
+  }
+
+  const start = nameEnd + "</div>".length;
+  const end = galleryStartIndex >= 0 ? galleryStartIndex : source.length;
+  if (end <= start) {
+    return "";
+  }
+
+  const raw = source.slice(start, end);
+  return normalizeMultilineText(htmlToText(raw));
+}
+
+function parseVkGalleryAttachments(galleryHtml, baseDir) {
+  const html = String(galleryHtml || "");
   const attachments = [];
   const seen = new Set();
 
-  for (const audio of gallery.querySelectorAll("audio")) {
-    const source =
-      audio.querySelector("source[src]")?.getAttribute("src") ||
-      audio.getAttribute("src") ||
-      "";
-    const url = normalizeMediaRef(source, baseDir);
-    if (!url) {
-      continue;
-    }
+  const anchorRanges = [];
+  const anchorRegex = /<a\b[^>]*\bhref=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/a>/gi;
+  let match = anchorRegex.exec(html);
 
-    const key = `audio:${url}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
+  while (match) {
+    const start = match.index;
+    const end = start + match[0].length;
+    anchorRanges.push([start, end]);
 
-    attachments.push({ type: "audio", url, title: "" });
-  }
-
-  for (const video of gallery.querySelectorAll("video")) {
-    const source =
-      video.querySelector("source[src]")?.getAttribute("src") ||
-      video.getAttribute("src") ||
-      "";
-    const url = normalizeMediaRef(source, baseDir);
-    if (!url) {
-      continue;
-    }
-
-    const key = `video:${url}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    attachments.push({ type: "video", url, title: "" });
-  }
-
-  for (const link of gallery.querySelectorAll("a[href]")) {
-    const hrefRaw = link.getAttribute("href") || "";
+    const hrefRaw = String(match[1] || match[2] || "");
     const href = normalizeMediaRef(hrefRaw, baseDir);
-    if (!href) {
-      continue;
-    }
+    if (href) {
+      const innerHtml = String(match[3] || "");
+      const imgMatch = innerHtml.match(/<img\b[^>]*\bsrc=(?:"([^"]+)"|'([^']+)')[^>]*>/i);
+      const title = normalizeMultilineText(htmlToText(innerHtml));
 
-    const img = link.querySelector("img[src]");
-    const title = normalizeMultilineText(link.textContent || "");
+      if (imgMatch) {
+        const thumbRaw = String(imgMatch[1] || imgMatch[2] || "");
+        const thumb = normalizeMediaRef(thumbRaw, baseDir);
+        const inferred = detectMediaTypeFromUrl(hrefRaw);
+        const type = inferred === "video" ? "video" : "image";
 
-    if (img) {
-      const thumb = normalizeMediaRef(img.getAttribute("src") || "", baseDir);
-      const inferred = detectMediaTypeFromUrl(hrefRaw);
-      const type = inferred === "video" ? "video" : "image";
-
-      const key = `${type}:${href}`;
-      if (seen.has(key)) {
-        continue;
+        const key = `${type}:${href}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          attachments.push({
+            type,
+            url: href,
+            thumbUrl: thumb || "",
+            title: "",
+          });
+        }
+      } else {
+        const type = looksLikeDocument(title, hrefRaw) ? "document" : "link";
+        const key = `${type}:${href}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          attachments.push({
+            type,
+            url: href,
+            title: title || href,
+          });
+        }
       }
-      seen.add(key);
-
-      attachments.push({
-        type,
-        url: href,
-        thumbUrl: thumb || "",
-        title: "",
-      });
-      continue;
     }
 
-    const type = looksLikeDocument(title, hrefRaw) ? "document" : "link";
-    const key = `${type}:${href}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    attachments.push({
-      type,
-      url: href,
-      title: title || href,
-    });
+    match = anchorRegex.exec(html);
   }
 
-  for (const img of gallery.querySelectorAll("img[src]")) {
-    if (img.closest("a[href]")) {
+  const audioRegex = /<audio\b[\s\S]*?<\/audio>/gi;
+  match = audioRegex.exec(html);
+
+  while (match) {
+    const audioBlock = match[0];
+    const srcMatch = audioBlock.match(/\bsrc=(?:"([^"]+)"|'([^']+)')/i);
+    const srcRaw = srcMatch ? String(srcMatch[1] || srcMatch[2] || "") : "";
+    const url = normalizeMediaRef(srcRaw, baseDir);
+    if (url) {
+      const key = `audio:${url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        attachments.push({ type: "audio", url, title: "" });
+      }
+    }
+
+    match = audioRegex.exec(html);
+  }
+
+  const videoRegex = /<video\b[\s\S]*?<\/video>/gi;
+  match = videoRegex.exec(html);
+
+  while (match) {
+    const videoBlock = match[0];
+    const srcMatch = videoBlock.match(/\bsrc=(?:"([^"]+)"|'([^']+)')/i);
+    const srcRaw = srcMatch ? String(srcMatch[1] || srcMatch[2] || "") : "";
+    const url = normalizeMediaRef(srcRaw, baseDir);
+    if (url) {
+      const key = `video:${url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        attachments.push({ type: "video", url, title: "" });
+      }
+    }
+
+    match = videoRegex.exec(html);
+  }
+
+  const imgRegex = /<img\b[^>]*\bsrc=(?:"([^"]+)"|'([^']+)')[^>]*>/gi;
+  match = imgRegex.exec(html);
+
+  while (match) {
+    const imgIndex = match.index;
+    if (isInsideRanges(anchorRanges, imgIndex)) {
+      match = imgRegex.exec(html);
       continue;
     }
 
-    const url = normalizeMediaRef(img.getAttribute("src") || "", baseDir);
-    if (!url) {
-      continue;
+    const srcRaw = String(match[1] || match[2] || "");
+    const url = normalizeMediaRef(srcRaw, baseDir);
+    if (url) {
+      const key = `image:${url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        attachments.push({ type: "image", url, title: "" });
+      }
     }
 
-    const key = `image:${url}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    attachments.push({ type: "image", url, title: "" });
+    match = imgRegex.exec(html);
   }
 
   return attachments;
+}
+
+function isInsideRanges(ranges, index) {
+  for (const range of ranges) {
+    const start = range[0];
+    const end = range[1];
+    if (index >= start && index < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stripTags(value) {
+  return String(value || "").replace(/<[^>]+>/g, "");
+}
+
+function htmlToText(html) {
+  let value = String(html || "");
+  value = value.replace(/\r\n?/g, "\n");
+  value = value.replace(/<br\s*\/?>/gi, "\n");
+  value = value.replace(/<\/p\s*>/gi, "\n");
+  value = value.replace(/<p\b[^>]*>/gi, "");
+  value = value.replace(/<script\b[\s\S]*?<\/script>/gi, "");
+  value = value.replace(/<style\b[\s\S]*?<\/style>/gi, "");
+  value = value.replace(/<[^>]+>/g, "");
+  value = decodeHtmlEntities(value);
+  return value;
+}
+
+function decodeHtmlEntities(value) {
+  const source = String(value || "");
+  return source.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (match, code) => {
+    if (!code) {
+      return match;
+    }
+
+    if (code[0] === "#") {
+      const numeric =
+        code[1] === "x" || code[1] === "X"
+          ? Number.parseInt(code.slice(2), 16)
+          : Number.parseInt(code.slice(1), 10);
+
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return match;
+      }
+
+      try {
+        return String.fromCodePoint(numeric);
+      } catch {
+        return match;
+      }
+    }
+
+    const named = code.toLowerCase();
+    if (named === "nbsp") {
+      return " ";
+    }
+    if (named === "amp") {
+      return "&";
+    }
+    if (named === "lt") {
+      return "<";
+    }
+    if (named === "gt") {
+      return ">";
+    }
+    if (named === "quot") {
+      return '"';
+    }
+    if (named === "apos") {
+      return "'";
+    }
+
+    return match;
+  });
 }
 
 function buildHtmlSearchText(text, attachments) {
@@ -895,4 +1096,3 @@ function dedupe(list) {
 
   return unique;
 }
-
