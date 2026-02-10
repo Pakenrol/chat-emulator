@@ -1,0 +1,3 @@
+# Keep local dialog exports private (do not commit any JSON files).
+*.json
+

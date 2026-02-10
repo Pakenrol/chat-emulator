@@ -5,7 +5,6 @@ const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 
 const dom = {
   fileInput: document.querySelector("#fileInput"),
-  loadSampleBtn: document.querySelector("#loadSampleBtn"),
   progressBar: document.querySelector("#progressBar"),
   loadStatus: document.querySelector("#loadStatus"),
   chatMeta: document.querySelector("#chatMeta"),
@@ -133,18 +132,6 @@ function attachEvents() {
     }
   });
 
-  dom.loadSampleBtn.addEventListener("click", async () => {
-    try {
-      const file = await loadSampleFromRepo();
-      beginLoad(file);
-    } catch (error) {
-      setStatus(
-        `Не получилось загрузить пример: ${getErrorMessage(error)}`,
-        0,
-      );
-    }
-  });
-
   dom.searchInput.addEventListener("input", () => {
     if (!state.messages.length) {
       return;
@@ -253,62 +240,6 @@ function attachEvents() {
       beginLoad(file);
     }
   });
-}
-
-async function loadSampleFromRepo() {
-  const candidatePaths = ["../214807272.json", "/214807272.json", "./214807272.json"];
-
-  for (const candidate of candidatePaths) {
-    try {
-      const response = await fetch(candidate);
-      if (!response.ok) {
-        continue;
-      }
-
-      // Cloudflare Pages (and some SPA setups) may return `index.html` with 200 for
-      // unknown paths. Detect and skip HTML responses to avoid parsing errors.
-      const contentType = (response.headers.get("content-type") || "").toLowerCase();
-      const looksLikeJsonByType = contentType.includes("json");
-      if (!looksLikeJsonByType) {
-        const peek = await peekResponseText(response.clone(), 160);
-        if (peek.trimStart().startsWith("<")) {
-          continue;
-        }
-      }
-
-      const blob = await response.blob();
-      return new File([blob], "214807272.json", {
-        type: blob.type || (looksLikeJsonByType ? contentType : "application/json"),
-      });
-    } catch {
-      // Try next path.
-    }
-  }
-
-  throw new Error(
-    "Не найден `214807272.json` рядом со страницей. Если вы запускаете локально, запустите сервер из корня репозитория; иначе загрузите свой JSON.",
-  );
-}
-
-async function peekResponseText(response, maxBytes) {
-  try {
-    if (!response.body) {
-      return "";
-    }
-
-    const reader = response.body.getReader();
-    const { value } = await reader.read();
-    reader.cancel().catch(() => {});
-
-    if (!value) {
-      return "";
-    }
-
-    const view = value.subarray(0, Math.max(0, Math.min(value.length, maxBytes)));
-    return new TextDecoder("utf-8", { fatal: false }).decode(view);
-  } catch {
-    return "";
-  }
 }
 
 function beginLoad(file) {
