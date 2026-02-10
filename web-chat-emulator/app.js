@@ -236,9 +236,20 @@ async function loadSampleFromRepo() {
         continue;
       }
 
+      // Cloudflare Pages (and some SPA setups) may return `index.html` with 200 for
+      // unknown paths. Detect and skip HTML responses to avoid parsing errors.
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      const looksLikeJsonByType = contentType.includes("json");
+      if (!looksLikeJsonByType) {
+        const peek = await peekResponseText(response.clone(), 160);
+        if (peek.trimStart().startsWith("<")) {
+          continue;
+        }
+      }
+
       const blob = await response.blob();
       return new File([blob], "214807272.json", {
-        type: blob.type || "application/json",
+        type: blob.type || (looksLikeJsonByType ? contentType : "application/json"),
       });
     } catch {
       // Try next path.
@@ -246,8 +257,29 @@ async function loadSampleFromRepo() {
   }
 
   throw new Error(
-    "Не найден `214807272.json`. Запустите сервер из корня репозитория.",
+    "Не найден `214807272.json` рядом со страницей. Если вы запускаете локально, запустите сервер из корня репозитория; иначе загрузите свой JSON.",
   );
+}
+
+async function peekResponseText(response, maxBytes) {
+  try {
+    if (!response.body) {
+      return "";
+    }
+
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    reader.cancel().catch(() => {});
+
+    if (!value) {
+      return "";
+    }
+
+    const view = value.subarray(0, Math.max(0, Math.min(value.length, maxBytes)));
+    return new TextDecoder("utf-8", { fatal: false }).decode(view);
+  } catch {
+    return "";
+  }
 }
 
 function beginLoad(file) {
