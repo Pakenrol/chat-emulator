@@ -262,6 +262,14 @@ button:disabled {
   padding: 0.85rem;
 }
 
+.chat-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.48rem;
+  margin-bottom: 0.65rem;
+}
+
 .chat-viewport {
   position: relative;
   height: min(74vh, 820px);
@@ -419,6 +427,15 @@ button:disabled {
 
   .chat {
     padding: 0.55rem;
+  }
+
+  .chat-toolbar {
+    justify-content: stretch;
+    margin-bottom: 0.55rem;
+  }
+
+  .chat-toolbar button {
+    flex: 1 1 0;
   }
 
   .chat-viewport {

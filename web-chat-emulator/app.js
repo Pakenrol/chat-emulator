@@ -16,6 +16,8 @@ const dom = {
   searchStatus: document.querySelector("#searchStatus"),
   prevMatchBtn: document.querySelector("#prevMatchBtn"),
   nextMatchBtn: document.querySelector("#nextMatchBtn"),
+  scrollToTopBtn: document.querySelector("#scrollToTopBtn"),
+  scrollToBottomBtn: document.querySelector("#scrollToBottomBtn"),
   chatViewport: document.querySelector("#chatViewport"),
   chatCanvas: document.querySelector("#chatCanvas"),
   emptyState: document.querySelector("#emptyState"),
@@ -204,12 +206,17 @@ function attachEvents() {
   dom.prevMatchBtn.addEventListener("click", () => moveMatchPointer(-1));
   dom.nextMatchBtn.addEventListener("click", () => moveMatchPointer(1));
 
+  dom.scrollToTopBtn.addEventListener("click", () => jumpToTop());
+  dom.scrollToBottomBtn.addEventListener("click", () => jumpToBottom());
+
   dom.chatViewport.addEventListener("scroll", () => {
     renderVisibleMessages();
+    updateScrollNavButtons();
   });
 
   window.addEventListener("resize", () => {
     renderVisibleMessages(true);
+    updateScrollNavButtons();
     if (state.searchSuggestionsVisible) {
       state.suggestionsRenderedStart = -1;
       state.suggestionsRenderedEnd = -1;
@@ -435,8 +442,10 @@ function hydrateConversation(payload) {
   setStatus("Диалог успешно загружен.", 1);
   clearEmptyState();
 
-  scrollToBottom();
+  // Open at the beginning by default; navigation buttons allow jumping to the end.
+  dom.chatViewport.scrollTop = 0;
   renderVisibleMessages(true);
+  updateScrollNavButtons();
 }
 
 function resetConversationState() {
@@ -475,6 +484,9 @@ function resetConversationState() {
   dom.searchSuggestions.hidden = true;
   dom.searchSuggestionsCanvas.style.height = "0px";
   dom.searchSuggestionsCanvas.replaceChildren();
+
+  dom.scrollToTopBtn.disabled = true;
+  dom.scrollToBottomBtn.disabled = true;
 }
 
 function renderVisibleMessages(force = false) {
@@ -550,6 +562,16 @@ function renderVisibleMessages(force = false) {
 
   dom.chatCanvas.replaceChildren(fragment);
   scheduleMeasurement();
+}
+
+function syncChatCanvasHeight() {
+  if (!state.tree) {
+    return;
+  }
+
+  const viewportHeight = dom.chatViewport.clientHeight || 1;
+  const totalHeight = Math.max(state.tree.total(), viewportHeight);
+  dom.chatCanvas.style.height = `${Math.ceil(totalHeight)}px`;
 }
 
 function scheduleMeasurement() {
@@ -1058,6 +1080,47 @@ function scrollToBottom() {
 
   const maxScroll = Math.max(0, state.tree.total() - dom.chatViewport.clientHeight);
   dom.chatViewport.scrollTop = maxScroll;
+}
+
+function jumpToTop() {
+  if (!state.tree) {
+    return;
+  }
+
+  dom.chatViewport.scrollTop = 0;
+  renderVisibleMessages(true);
+  updateScrollNavButtons();
+}
+
+function jumpToBottom() {
+  if (!state.tree) {
+    return;
+  }
+
+  syncChatCanvasHeight();
+  scrollToBottom();
+  renderVisibleMessages(true);
+  updateScrollNavButtons();
+}
+
+function updateScrollNavButtons() {
+  if (!dom.scrollToTopBtn || !dom.scrollToBottomBtn) {
+    return;
+  }
+
+  if (!state.messages.length || !state.tree) {
+    dom.scrollToTopBtn.disabled = true;
+    dom.scrollToBottomBtn.disabled = true;
+    return;
+  }
+
+  const scrollTop = dom.chatViewport.scrollTop;
+  const viewportHeight = dom.chatViewport.clientHeight || 1;
+  const maxScrollTop = Math.max(0, dom.chatViewport.scrollHeight - viewportHeight);
+  const epsilon = 2;
+
+  dom.scrollToTopBtn.disabled = scrollTop <= epsilon;
+  dom.scrollToBottomBtn.disabled = scrollTop >= maxScrollTop - epsilon;
 }
 
 function isIndexInSearchResults(index) {
