@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat Emulator</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero card">
+        <div>
+          <h1>Chat Emulator</h1>
+          <p>
+            Загрузите экспорт диалога в JSON и откройте переписку с поиском по
+            сообщениям.
+          </p>
+        </div>
+      </header>
+
+      <section class="controls card">
+        <div class="upload-row">
+          <label class="file-button" for="fileInput">
+            Выбрать файл
+            <input
+              id="fileInput"
+              type="file"
+              accept=".json,.js,application/json,text/javascript"
+            />
+          </label>
+          <button id="loadSampleBtn" type="button">Открыть файл из репо</button>
+        </div>
+
+        <div class="status-row">
+          <div class="progress-track" aria-hidden="true">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div id="loadStatus" class="load-status">Файл не загружен</div>
+        </div>
+
+        <div id="chatMeta" class="chat-meta">Нет активного диалога</div>
+      </section>
+
+      <section class="search card">
+        <label class="search-label" for="searchInput">Поиск по сообщениям</label>
+        <div class="search-row">
+          <input
+            id="searchInput"
+            type="search"
+            placeholder="Введите текст"
+            autocomplete="off"
+            aria-controls="searchSuggestions"
+            aria-expanded="false"
+            aria-haspopup="listbox"
+            aria-autocomplete="list"
+            disabled
+          />
+          <button id="prevMatchBtn" type="button" disabled>Prev</button>
+          <button id="nextMatchBtn" type="button" disabled>Next</button>
+        </div>
+        <div
+          id="searchSuggestions"
+          class="search-suggestions"
+          role="listbox"
+          hidden
+        ></div>
+        <div id="searchStatus" class="search-status">Поиск недоступен</div>
+      </section>
+
+      <section class="chat card">
+        <div id="chatViewport" class="chat-viewport">
+          <div id="chatCanvas" class="chat-canvas"></div>
+          <div id="emptyState" class="empty-state">
+            Загрузите JSON, чтобы увидеть переписку.
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
