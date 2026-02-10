@@ -24,13 +24,17 @@ jobs:
           command: pages deploy web-chat-emulator --project-name=chat-emulator --branch=main
 
       - name: Notify Telegram (success)
-        if: ${{ success() && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        if: ${{ success() }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets not set; skipping."
+            exit 0
+          fi
           RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           MSG="$(printf 'Deploy succeeded: %s@%s\n%s\n%s' "${GITHUB_REPOSITORY}" "${GITHUB_SHA}" "${RUN_URL}" 'https://chat-emulator.pages.dev')"
           curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -40,12 +44,16 @@ jobs:
             > /dev/null
 
       - name: Notify ntfy (success)
-        if: ${{ success() && secrets.NTFY_TOPIC != '' }}
+        if: ${{ success() }}
         continue-on-error: true
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           set -euo pipefail
+          if [ -z "${NTFY_TOPIC:-}" ]; then
+            echo "NTFY_TOPIC secret not set; skipping."
+            exit 0
+          fi
           RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           MSG="$(printf 'Deploy succeeded: %s@%s\n%s\n%s' "${GITHUB_REPOSITORY}" "${GITHUB_SHA}" "${RUN_URL}" 'https://chat-emulator.pages.dev')"
           curl -sS -X POST \
