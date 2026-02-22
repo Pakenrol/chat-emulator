@@ -543,7 +543,10 @@ button:disabled {
   background: #fffaf2;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-auto-flow: row;
+  grid-auto-rows: minmax(0, auto);
   gap: 0.55rem;
+  align-items: start;
   align-content: start;
   -webkit-overflow-scrolling: touch;
 }
@@ -568,7 +571,12 @@ button:disabled {
   display: grid;
   grid-template-rows: auto auto auto;
   gap: 0.38rem;
-  min-height: 0;
+  min-height: 236px;
+  align-content: start;
+  overflow: hidden;
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: 260px;
 }
 
 .attachments-item.active {
@@ -578,6 +586,7 @@ button:disabled {
 
 .attachments-item-open {
   min-height: 0;
+  min-width: 0;
   width: 100%;
   padding: 0.36rem;
   border-radius: 8px;
@@ -587,6 +596,7 @@ button:disabled {
   display: grid;
   grid-template-rows: auto auto;
   gap: 0.38rem;
+  align-content: start;
 }
 
 .attachments-item-open:hover:enabled {
@@ -611,6 +621,7 @@ button:disabled {
 }
 
 .attachments-item-thumb img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -683,6 +694,7 @@ button:disabled {
 
 .attachments-item-actions {
   display: flex;
+  min-width: 0;
   gap: 0.35rem;
   flex-wrap: wrap;
 }

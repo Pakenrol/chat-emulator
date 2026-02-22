@@ -3,7 +3,9 @@ const OVERSCAN = 12;
 const SEARCH_DEBOUNCE_MS = 160;
 const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 const JUMP_FOCUS_TIMEOUT_MS = 1900;
-const ATTACHMENTS_RENDER_CHUNK_SIZE = 140;
+const ATTACHMENTS_RENDER_CHUNK_SIZE = 72;
+const ATTACHMENTS_INITIAL_BATCH_SIZE = 180;
+const ATTACHMENTS_LOAD_AHEAD_PX = 680;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -87,6 +89,10 @@ const state = {
   attachmentsById: new Map(),
   attachmentsMediaOnly: false,
   attachmentsRenderToken: 0,
+  attachmentsThumbObserver: null,
+  attachmentsRenderItems: [],
+  attachmentsRenderedCount: 0,
+  attachmentsRenderQueued: false,
   selectedAttachmentId: null,
   attachmentsOpen: false,
   jumpFocusIndex: -1,
@@ -265,6 +271,13 @@ function attachEvents() {
   });
 
   dom.attachmentsList?.addEventListener("click", handleAttachmentListClick);
+  dom.attachmentsList?.addEventListener(
+    "scroll",
+    () => {
+      maybeAppendAttachmentCards();
+    },
+    { passive: true },
+  );
   dom.attachmentsPreview?.addEventListener("click", handleAttachmentPreviewClick);
   dom.attachmentsMediaOnlyToggle?.addEventListener("change", handleAttachmentsMediaOnlyToggle);
   dom.chatCanvas.addEventListener("click", handleChatMediaClick);
@@ -626,6 +639,10 @@ function resetConversationState() {
   state.attachmentsById = new Map();
   state.attachmentsMediaOnly = false;
   state.attachmentsRenderToken = 0;
+  resetAttachmentsThumbObserver();
+  state.attachmentsRenderItems = [];
+  state.attachmentsRenderedCount = 0;
+  state.attachmentsRenderQueued = false;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
   state.jumpFocusIndex = -1;
@@ -1430,6 +1447,80 @@ function formatTimestamp(value) {
   return Number.isFinite(value) ? dateFormatter.format(value) : "без времени";
 }
 
+function resetAttachmentsThumbObserver() {
+  if (state.attachmentsThumbObserver) {
+    state.attachmentsThumbObserver.disconnect();
+    state.attachmentsThumbObserver = null;
+  }
+}
+
+function loadAttachmentThumb(img) {
+  if (!(img instanceof HTMLImageElement)) {
+    return;
+  }
+
+  if (img.dataset.thumbLoaded === "true") {
+    return;
+  }
+
+  const rawThumb = String(img.dataset.thumbRaw || "").trim();
+  const rawFallback = String(img.dataset.urlRaw || "").trim();
+  const resolved = resolveMediaUrl(rawThumb || rawFallback);
+  if (!resolved) {
+    return;
+  }
+
+  img.src = resolved;
+  img.dataset.thumbLoaded = "true";
+}
+
+function getAttachmentsThumbObserver() {
+  if (state.attachmentsThumbObserver) {
+    return state.attachmentsThumbObserver;
+  }
+
+  if (typeof IntersectionObserver === "undefined") {
+    return null;
+  }
+
+  state.attachmentsThumbObserver = new IntersectionObserver(
+    (entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) {
+          continue;
+        }
+
+        const target = entry.target;
+        if (target instanceof HTMLImageElement) {
+          loadAttachmentThumb(target);
+        }
+        observer.unobserve(target);
+      }
+    },
+    {
+      root: dom.attachmentsList,
+      rootMargin: "280px 0px",
+      threshold: 0.01,
+    },
+  );
+
+  return state.attachmentsThumbObserver;
+}
+
+function queueAttachmentThumbLoad(img) {
+  if (!(img instanceof HTMLImageElement)) {
+    return;
+  }
+
+  const observer = getAttachmentsThumbObserver();
+  if (!observer) {
+    loadAttachmentThumb(img);
+    return;
+  }
+
+  observer.observe(img);
+}
+
 function isPrimaryMediaAttachment(type) {
   const normalized = normalizeAttachmentType(type);
   return normalized === "image" || normalized === "video";
@@ -1550,7 +1641,11 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
     return;
   }
 
+  resetAttachmentsThumbObserver();
   state.attachmentsRenderToken += 1;
+  state.attachmentsRenderItems = [];
+  state.attachmentsRenderedCount = 0;
+  state.attachmentsRenderQueued = false;
   state.attachmentsOpen = false;
   dom.attachmentsPanel.hidden = true;
   dom.attachmentsPanel.setAttribute("aria-hidden", "true");
@@ -1572,9 +1667,12 @@ function renderAttachmentList() {
     return;
   }
 
+  resetAttachmentsThumbObserver();
   const items = getVisibleAttachments();
   state.attachmentsRenderToken += 1;
-  const renderToken = state.attachmentsRenderToken;
+  state.attachmentsRenderItems = items;
+  state.attachmentsRenderedCount = 0;
+  state.attachmentsRenderQueued = false;
   dom.attachmentsList.replaceChildren();
 
   if (!items.length) {
@@ -1588,28 +1686,72 @@ function renderAttachmentList() {
     return;
   }
 
-  let cursor = 0;
-  const renderChunk = () => {
-    if (!dom.attachmentsList || renderToken !== state.attachmentsRenderToken) {
-      return;
+  appendAttachmentCardsBatch({ initial: true });
+}
+
+function maybeAppendAttachmentCards() {
+  if (!dom.attachmentsList || state.attachmentsRenderQueued) {
+    return;
+  }
+
+  const remaining =
+    dom.attachmentsList.scrollHeight -
+    dom.attachmentsList.clientHeight -
+    dom.attachmentsList.scrollTop;
+
+  if (remaining <= ATTACHMENTS_LOAD_AHEAD_PX) {
+    appendAttachmentCardsBatch();
+  }
+}
+
+function appendAttachmentCardsBatch({ initial = false } = {}) {
+  if (!dom.attachmentsList) {
+    return;
+  }
+
+  const token = state.attachmentsRenderToken;
+  const items = state.attachmentsRenderItems;
+  const total = Array.isArray(items) ? items.length : 0;
+  const cursor = state.attachmentsRenderedCount;
+  if (!total || cursor >= total) {
+    return;
+  }
+
+  const batchSize = initial ? ATTACHMENTS_INITIAL_BATCH_SIZE : ATTACHMENTS_RENDER_CHUNK_SIZE;
+  const limit = Math.min(total, cursor + batchSize);
+  const selectedId = Number(state.selectedAttachmentId);
+
+  const fragment = document.createDocumentFragment();
+  let appendedSelected = false;
+
+  for (let index = cursor; index < limit; index += 1) {
+    const item = items[index];
+    fragment.appendChild(createAttachmentListCard(item));
+    if (Number.isInteger(selectedId) && item.id === selectedId) {
+      appendedSelected = true;
     }
+  }
 
-    const fragment = document.createDocumentFragment();
-    const limit = Math.min(items.length, cursor + ATTACHMENTS_RENDER_CHUNK_SIZE);
+  dom.attachmentsList.appendChild(fragment);
+  state.attachmentsRenderedCount = limit;
 
-    for (; cursor < limit; cursor += 1) {
-      fragment.appendChild(createAttachmentListCard(items[cursor]));
-    }
-
-    dom.attachmentsList.appendChild(fragment);
+  if (appendedSelected || limit >= total) {
     syncAttachmentSelectionUi();
+  }
 
-    if (cursor < items.length) {
-      requestAnimationFrame(renderChunk);
-    }
-  };
-
-  renderChunk();
+  if (
+    limit < total &&
+    dom.attachmentsList.scrollHeight <= dom.attachmentsList.clientHeight + ATTACHMENTS_LOAD_AHEAD_PX
+  ) {
+    state.attachmentsRenderQueued = true;
+    requestAnimationFrame(() => {
+      state.attachmentsRenderQueued = false;
+      if (token !== state.attachmentsRenderToken) {
+        return;
+      }
+      appendAttachmentCardsBatch();
+    });
+  }
 }
 
 function createAttachmentListCard(item) {
@@ -1704,18 +1846,15 @@ function createAttachmentListThumb(item) {
   const slot = document.createElement("span");
   slot.className = "attachments-item-thumb";
 
-  const imagePreviewUrl =
-    item.type === "image" || item.type === "video"
-      ? resolveMediaUrl(item.thumbUrl || item.url)
-      : "";
-
-  if (imagePreviewUrl) {
+  if (item.type === "image" || item.type === "video") {
     const img = document.createElement("img");
     img.loading = "lazy";
     img.decoding = "async";
     img.alt = item.title || getAttachmentTypeLabel(item.type);
-    img.src = imagePreviewUrl;
+    img.dataset.thumbRaw = String(item.thumbUrl || "");
+    img.dataset.urlRaw = String(item.url || "");
     slot.appendChild(img);
+    queueAttachmentThumbLoad(img);
   } else {
     const badge = document.createElement("span");
     badge.className = "attachments-item-thumb-badge";
