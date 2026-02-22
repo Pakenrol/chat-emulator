@@ -485,7 +485,9 @@ function parseVkGalleryAttachments(galleryHtml, baseDir) {
         const thumbRaw = String(imgMatch[1] || imgMatch[2] || "");
         const thumb = normalizeMediaRef(thumbRaw, baseDir);
         const inferred = detectMediaTypeFromUrl(hrefRaw);
-        const type = inferred === "video" ? "video" : "image";
+        const looksLikeVideoThumb =
+          /\btype=video_thumb\b/i.test(thumbRaw) || /\/video_l\.png(?:$|[?#])/i.test(thumbRaw);
+        const type = inferred === "video" || looksLikeVideoThumb ? "video" : "image";
 
         const key = `${type}:${href}`;
         if (!seen.has(key)) {
@@ -695,6 +697,13 @@ function buildHtmlSearchText(text, attachments) {
 
 function detectMediaTypeFromUrl(url) {
   const normalized = String(url || "").toLowerCase();
+  if (
+    normalized.includes("vk.com/video") ||
+    normalized.includes("vkvideo.ru/video") ||
+    normalized.includes("vkuservideo.net/")
+  ) {
+    return "video";
+  }
   if (/\.(mp4|webm|mkv)(?:$|[?#])/.test(normalized)) {
     return "video";
   }

@@ -82,6 +82,7 @@
 
       <section class="chat card">
         <div class="chat-toolbar" aria-label="Навигация по переписке">
+          <button id="openAttachmentsBtn" type="button" disabled>Вложения</button>
           <button id="scrollToTopBtn" type="button" disabled>В начало</button>
           <button id="scrollToBottomBtn" type="button" disabled>В конец</button>
         </div>
@@ -93,6 +94,60 @@
         </div>
       </section>
     </main>
+
+    <section
+      id="attachmentsPanel"
+      class="attachments-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      aria-labelledby="attachmentsTitle"
+      hidden
+    >
+      <div class="attachments-dialog card">
+        <header class="attachments-header">
+          <div>
+            <h2 id="attachmentsTitle">Вложения</h2>
+            <p id="attachmentsCount" class="attachments-count">0 вложений</p>
+          </div>
+          <button id="closeAttachmentsBtn" type="button">Закрыть</button>
+        </header>
+
+        <div class="attachments-content">
+          <div id="attachmentsList" class="attachments-list"></div>
+          <div id="attachmentsPreview" class="attachments-preview"></div>
+        </div>
+      </div>
+    </section>
+
+    <section
+      id="mediaViewer"
+      class="media-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      aria-labelledby="mediaViewerLabel"
+      hidden
+    >
+      <div class="media-viewer-dialog card">
+        <header class="media-viewer-header">
+          <p id="mediaViewerLabel" class="media-viewer-label">Просмотр вложения</p>
+          <div class="media-viewer-actions">
+            <a
+              id="mediaViewerOpenOriginal"
+              class="media-viewer-open-original"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Открыть оригинал
+            </a>
+            <button id="closeMediaViewerBtn" type="button">Закрыть</button>
+          </div>
+        </header>
+        <div id="mediaViewerStage" class="media-viewer-stage"></div>
+      </div>
+    </section>
 
     <script type="module" src="./app.js"></script>
   </body>

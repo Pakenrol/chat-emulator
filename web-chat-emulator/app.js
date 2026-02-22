@@ -2,6 +2,23 @@ const ESTIMATED_ROW_HEIGHT = 78;
 const OVERSCAN = 12;
 const SEARCH_DEBOUNCE_MS = 160;
 const SEARCH_SUGGESTIONS_OVERSCAN = 8;
+const JUMP_FOCUS_TIMEOUT_MS = 1900;
+
+const ATTACHMENT_TYPE_LABELS = {
+  image: "Фото",
+  video: "Видео",
+  audio: "Аудио",
+  document: "Документ",
+  link: "Ссылка",
+};
+
+const ATTACHMENT_TYPE_BADGES = {
+  image: "IMG",
+  video: "VID",
+  audio: "AUD",
+  document: "DOC",
+  link: "URL",
+};
 
 const dom = {
   fileInput: document.querySelector("#fileInput"),
@@ -16,11 +33,22 @@ const dom = {
   searchStatus: document.querySelector("#searchStatus"),
   prevMatchBtn: document.querySelector("#prevMatchBtn"),
   nextMatchBtn: document.querySelector("#nextMatchBtn"),
+  openAttachmentsBtn: document.querySelector("#openAttachmentsBtn"),
   scrollToTopBtn: document.querySelector("#scrollToTopBtn"),
   scrollToBottomBtn: document.querySelector("#scrollToBottomBtn"),
   chatViewport: document.querySelector("#chatViewport"),
   chatCanvas: document.querySelector("#chatCanvas"),
   emptyState: document.querySelector("#emptyState"),
+  attachmentsPanel: document.querySelector("#attachmentsPanel"),
+  closeAttachmentsBtn: document.querySelector("#closeAttachmentsBtn"),
+  attachmentsCount: document.querySelector("#attachmentsCount"),
+  attachmentsList: document.querySelector("#attachmentsList"),
+  attachmentsPreview: document.querySelector("#attachmentsPreview"),
+  mediaViewer: document.querySelector("#mediaViewer"),
+  closeMediaViewerBtn: document.querySelector("#closeMediaViewerBtn"),
+  mediaViewerLabel: document.querySelector("#mediaViewerLabel"),
+  mediaViewerOpenOriginal: document.querySelector("#mediaViewerOpenOriginal"),
+  mediaViewerStage: document.querySelector("#mediaViewerStage"),
 };
 
 const state = {
@@ -52,6 +80,17 @@ const state = {
   searchDebounceId: null,
   assetFiles: null,
   assetUrlCache: null,
+  attachmentsIndex: [],
+  attachmentsById: new Map(),
+  selectedAttachmentId: null,
+  attachmentsOpen: false,
+  jumpFocusIndex: -1,
+  jumpFocusTimeoutId: null,
+  mediaViewerOpen: false,
+  mediaViewerType: "",
+  mediaViewerUrl: "",
+  mediaViewerPoster: "",
+  mediaViewerTitle: "",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
@@ -207,6 +246,32 @@ function attachEvents() {
   dom.prevMatchBtn.addEventListener("click", () => moveMatchPointer(-1));
   dom.nextMatchBtn.addEventListener("click", () => moveMatchPointer(1));
 
+  dom.openAttachmentsBtn?.addEventListener("click", () => {
+    openAttachmentsPanel();
+  });
+  dom.closeAttachmentsBtn?.addEventListener("click", () => {
+    closeAttachmentsPanel();
+  });
+
+  dom.attachmentsPanel?.addEventListener("click", (event) => {
+    if (event.target === dom.attachmentsPanel) {
+      closeAttachmentsPanel();
+    }
+  });
+
+  dom.attachmentsList?.addEventListener("click", handleAttachmentListClick);
+  dom.attachmentsPreview?.addEventListener("click", handleAttachmentPreviewClick);
+  dom.chatCanvas.addEventListener("click", handleChatMediaClick);
+
+  dom.mediaViewer?.addEventListener("click", (event) => {
+    if (event.target === dom.mediaViewer) {
+      closeMediaViewer();
+    }
+  });
+  dom.closeMediaViewerBtn?.addEventListener("click", () => {
+    closeMediaViewer();
+  });
+
   dom.scrollToTopBtn.addEventListener("click", () => jumpToTop());
   dom.scrollToBottomBtn.addEventListener("click", () => jumpToBottom());
 
@@ -246,8 +311,33 @@ function attachEvents() {
       return;
     }
 
+    if (state.mediaViewerOpen && dom.mediaViewer?.contains(target)) {
+      return;
+    }
+
+    if (state.attachmentsOpen && dom.attachmentsPanel?.contains(target)) {
+      return;
+    }
+
     if (!dom.searchSection?.contains(target)) {
       closeSearchSuggestions();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    if (state.mediaViewerOpen) {
+      event.preventDefault();
+      closeMediaViewer();
+      return;
+    }
+
+    if (state.attachmentsOpen) {
+      event.preventDefault();
+      closeAttachmentsPanel();
     }
   });
 
@@ -413,11 +503,18 @@ function hydrateConversation(payload) {
   state.suggestionsForceNextRender = false;
   state.searchQuery = "";
   state.previousSearchQuery = "";
+  state.jumpFocusIndex = -1;
+
+  const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
+  state.attachmentsIndex = attachmentItems;
+  state.attachmentsById = attachmentsById;
+  state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
 
   if (!state.messages.length) {
     setStatus("Источник загружен, но сообщений не найдено.", 1);
     dom.searchStatus.textContent = "Совпадений: 0";
     dom.chatMeta.textContent = "Нет сообщений в загруженном источнике";
+    updateAttachmentsUi();
     setEmptyState("В источнике нет сообщений.");
     return;
   }
@@ -459,6 +556,7 @@ function hydrateConversation(payload) {
   dom.prevMatchBtn.disabled = true;
   dom.nextMatchBtn.disabled = true;
   closeSearchSuggestions();
+  updateAttachmentsUi();
 
   setStatus("Диалог успешно загружен.", 1);
   clearEmptyState();
@@ -473,6 +571,11 @@ function resetConversationState() {
   if (state.searchDebounceId) {
     clearTimeout(state.searchDebounceId);
     state.searchDebounceId = null;
+  }
+
+  if (state.jumpFocusTimeoutId) {
+    clearTimeout(state.jumpFocusTimeoutId);
+    state.jumpFocusTimeoutId = null;
   }
 
   if (state.assetUrlCache instanceof Map) {
@@ -506,6 +609,16 @@ function resetConversationState() {
   state.rightSideId = null;
   state.assetFiles = null;
   state.assetUrlCache = null;
+  state.attachmentsIndex = [];
+  state.attachmentsById = new Map();
+  state.selectedAttachmentId = null;
+  state.attachmentsOpen = false;
+  state.jumpFocusIndex = -1;
+  state.mediaViewerOpen = false;
+  state.mediaViewerType = "";
+  state.mediaViewerUrl = "";
+  state.mediaViewerPoster = "";
+  state.mediaViewerTitle = "";
 
   dom.chatCanvas.replaceChildren();
   dom.searchInput.disabled = true;
@@ -518,6 +631,10 @@ function resetConversationState() {
 
   dom.scrollToTopBtn.disabled = true;
   dom.scrollToBottomBtn.disabled = true;
+
+  closeAttachmentsPanel({ restoreFocus: false });
+  closeMediaViewer({ restoreFocus: false });
+  updateAttachmentsUi();
 }
 
 function renderVisibleMessages(force = false) {
@@ -561,6 +678,10 @@ function renderVisibleMessages(force = false) {
 
     if (index === activeMessageIndex) {
       row.classList.add("active-match");
+    }
+
+    if (index === state.jumpFocusIndex) {
+      row.classList.add("jump-focus");
     }
 
     row.dataset.index = String(index);
@@ -632,16 +753,27 @@ function scheduleMeasurement() {
     }
 
     const shouldPinBottom = state.pinToBottom || isChatNearBottom();
+    const scrollTopBefore = dom.chatViewport.scrollTop;
+    const anchorIndex = state.tree.lowerBound(scrollTopBefore);
+    let deltaBeforeAnchor = 0;
     let changed = false;
 
     for (const row of dom.chatCanvas.children) {
       const index = Number(row.dataset.index);
-      const measuredHeight = Math.max(44, Math.ceil(row.getBoundingClientRect().height));
-      const previousHeight = state.rowHeights[index];
+      if (!Number.isInteger(index) || index < 0 || index >= state.rowHeights.length) {
+        continue;
+      }
 
-      if (Math.abs(measuredHeight - previousHeight) > 1) {
+      const measuredHeight = Math.max(44, Math.ceil(row.getBoundingClientRect().height));
+      const previousHeight = state.rowHeights[index] || ESTIMATED_ROW_HEIGHT;
+      const delta = measuredHeight - previousHeight;
+
+      if (Math.abs(delta) > 1) {
         state.rowHeights[index] = measuredHeight;
-        state.tree.update(index, measuredHeight - previousHeight);
+        state.tree.update(index, delta);
+        if (!shouldPinBottom && index < anchorIndex) {
+          deltaBeforeAnchor += delta;
+        }
         changed = true;
       }
     }
@@ -649,6 +781,16 @@ function scheduleMeasurement() {
     if (changed) {
       if (shouldPinBottom) {
         scrollToBottom(true);
+      } else {
+        syncChatCanvasHeight();
+        if (Math.abs(deltaBeforeAnchor) > 0.5) {
+          const maxScrollTop = Math.max(
+            0,
+            dom.chatViewport.scrollHeight - (dom.chatViewport.clientHeight || 1),
+          );
+          const targetScrollTop = clampNumber(scrollTopBefore + deltaBeforeAnchor, 0, maxScrollTop);
+          setChatScrollTop(targetScrollTop);
+        }
       }
 
       renderVisibleMessages(true);
@@ -1197,6 +1339,639 @@ function updateScrollNavButtons() {
   dom.scrollToBottomBtn.disabled = scrollTop >= maxScrollTop - epsilon;
 }
 
+function buildAttachmentsIndex(messages) {
+  const items = [];
+  const byId = new Map();
+  let nextId = 1;
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (!attachments.length) {
+      continue;
+    }
+
+    for (let attachmentIndex = 0; attachmentIndex < attachments.length; attachmentIndex += 1) {
+      const attachment = attachments[attachmentIndex] || {};
+      const type = normalizeAttachmentType(attachment.type);
+      const title = String(attachment.title || "").trim();
+      const url = String(attachment.url || "").trim();
+      const thumbUrl = String(attachment.thumbUrl || "").trim();
+
+      if (!url && !thumbUrl) {
+        continue;
+      }
+
+      const item = {
+        id: nextId,
+        type,
+        title,
+        url,
+        thumbUrl,
+        messageIndex,
+        messageId: message?.id ?? null,
+        messagePreview: truncateText(
+          String(message?.text || message?.searchText || "").replace(/\s+/g, " ").trim(),
+          136,
+        ),
+        sender: message?.sender || `ID ${message?.from ?? "?"}`,
+        timestamp: message?.timestamp ?? null,
+      };
+
+      items.push(item);
+      byId.set(nextId, item);
+      nextId += 1;
+    }
+  }
+
+  return { items, byId };
+}
+
+function normalizeAttachmentType(type) {
+  const normalized = String(type || "").trim().toLowerCase();
+
+  if (
+    normalized === "image" ||
+    normalized === "video" ||
+    normalized === "audio" ||
+    normalized === "document" ||
+    normalized === "link"
+  ) {
+    return normalized;
+  }
+
+  return "link";
+}
+
+function getAttachmentTypeLabel(type) {
+  return ATTACHMENT_TYPE_LABELS[normalizeAttachmentType(type)] || "Файл";
+}
+
+function formatTimestamp(value) {
+  return Number.isFinite(value) ? dateFormatter.format(value) : "без времени";
+}
+
+function updateAttachmentsUi() {
+  const count = state.attachmentsIndex.length;
+
+  if (dom.openAttachmentsBtn) {
+    dom.openAttachmentsBtn.disabled = count === 0;
+    dom.openAttachmentsBtn.textContent =
+      count > 0 ? `Вложения (${count.toLocaleString("ru-RU")})` : "Вложения";
+  }
+
+  if (dom.attachmentsCount) {
+    dom.attachmentsCount.textContent = `${count.toLocaleString("ru-RU")} вложений`;
+  }
+
+  if (!count) {
+    state.selectedAttachmentId = null;
+    renderAttachmentList();
+    renderAttachmentPreview();
+
+    if (state.attachmentsOpen) {
+      closeAttachmentsPanel({ restoreFocus: false });
+    }
+
+    return;
+  }
+
+  if (!findAttachmentItemById(state.selectedAttachmentId)) {
+    state.selectedAttachmentId = state.attachmentsIndex[0]?.id ?? null;
+  }
+
+  if (state.attachmentsOpen) {
+    renderAttachmentsPanel();
+  }
+}
+
+function openAttachmentsPanel() {
+  if (!state.attachmentsIndex.length || !dom.attachmentsPanel) {
+    return;
+  }
+
+  state.attachmentsOpen = true;
+  closeSearchSuggestions();
+  dom.attachmentsPanel.hidden = false;
+  dom.attachmentsPanel.setAttribute("aria-hidden", "false");
+  document.body.classList.add("attachments-open");
+
+  if (!findAttachmentItemById(state.selectedAttachmentId)) {
+    state.selectedAttachmentId = state.attachmentsIndex[0]?.id ?? null;
+  }
+
+  renderAttachmentsPanel();
+}
+
+function closeAttachmentsPanel({ restoreFocus = true } = {}) {
+  if (!dom.attachmentsPanel) {
+    return;
+  }
+
+  state.attachmentsOpen = false;
+  dom.attachmentsPanel.hidden = true;
+  dom.attachmentsPanel.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("attachments-open");
+
+  if (restoreFocus) {
+    dom.openAttachmentsBtn?.focus({ preventScroll: true });
+  }
+}
+
+function renderAttachmentsPanel() {
+  renderAttachmentList();
+  renderAttachmentPreview();
+}
+
+function renderAttachmentList() {
+  if (!dom.attachmentsList) {
+    return;
+  }
+
+  if (!state.attachmentsIndex.length) {
+    const empty = document.createElement("p");
+    empty.className = "attachments-list-empty";
+    empty.textContent = "Во вложениях этого диалога ничего не найдено.";
+    dom.attachmentsList.replaceChildren(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  for (const item of state.attachmentsIndex) {
+    const card = document.createElement("article");
+    card.className = "attachments-item";
+    card.dataset.attachmentId = String(item.id);
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "attachments-item-open";
+    openButton.dataset.action = "preview";
+    openButton.dataset.attachmentId = String(item.id);
+
+    const thumb = createAttachmentListThumb(item);
+    const main = document.createElement("span");
+    main.className = "attachments-item-main";
+
+    const title = document.createElement("span");
+    title.className = "attachments-item-title";
+    title.textContent = item.title || getAttachmentTypeLabel(item.type);
+
+    const meta = document.createElement("span");
+    meta.className = "attachments-item-meta";
+    meta.textContent = `${item.sender} · ${formatTimestamp(item.timestamp)}`;
+
+    main.append(title, meta);
+    openButton.append(thumb, main);
+
+    const jumpButton = document.createElement("button");
+    jumpButton.type = "button";
+    jumpButton.className = "attachments-item-jump";
+    jumpButton.textContent = "К сообщению";
+    jumpButton.dataset.action = "jump";
+    jumpButton.dataset.attachmentId = String(item.id);
+
+    card.append(openButton, jumpButton);
+    fragment.appendChild(card);
+  }
+
+  dom.attachmentsList.replaceChildren(fragment);
+  syncAttachmentSelectionUi();
+}
+
+function syncAttachmentSelectionUi() {
+  if (!dom.attachmentsList) {
+    return;
+  }
+
+  const selectedId = Number(state.selectedAttachmentId);
+  for (const node of dom.attachmentsList.querySelectorAll(".attachments-item")) {
+    const itemId = Number(node.dataset.attachmentId);
+    const isActive = Number.isInteger(itemId) && itemId === selectedId;
+    node.classList.toggle("active", isActive);
+
+    const openButton = node.querySelector(".attachments-item-open");
+    if (openButton instanceof HTMLButtonElement) {
+      openButton.setAttribute("aria-pressed", String(isActive));
+    }
+  }
+}
+
+function createAttachmentListThumb(item) {
+  const slot = document.createElement("span");
+  slot.className = "attachments-item-thumb";
+
+  const imagePreviewUrl =
+    item.type === "image" || item.type === "video"
+      ? resolveMediaUrl(item.thumbUrl || item.url)
+      : "";
+
+  if (imagePreviewUrl) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = item.title || getAttachmentTypeLabel(item.type);
+    img.src = imagePreviewUrl;
+    slot.appendChild(img);
+    return slot;
+  }
+
+  slot.textContent = ATTACHMENT_TYPE_BADGES[item.type] || "FILE";
+  return slot;
+}
+
+function renderAttachmentPreview() {
+  if (!dom.attachmentsPreview) {
+    return;
+  }
+
+  const item = findAttachmentItemById(state.selectedAttachmentId);
+  dom.attachmentsPreview.replaceChildren();
+
+  if (!item) {
+    const empty = document.createElement("p");
+    empty.className = "attachments-preview-empty";
+    empty.textContent = state.attachmentsIndex.length
+      ? "Выберите вложение слева, чтобы посмотреть его."
+      : "Вложения отсутствуют.";
+    dom.attachmentsPreview.appendChild(empty);
+    return;
+  }
+
+  const mediaUrl = resolveMediaUrl(item.url);
+  const thumbUrl = resolveMediaUrl(item.thumbUrl || item.url);
+
+  const header = document.createElement("div");
+  header.className = "attachments-preview-header";
+
+  const title = document.createElement("h3");
+  title.className = "attachments-preview-title";
+  title.textContent = item.title || getAttachmentTypeLabel(item.type);
+
+  const meta = document.createElement("p");
+  meta.className = "attachments-preview-meta";
+  meta.textContent = `${getAttachmentTypeLabel(item.type)} · ${item.sender} · ${formatTimestamp(item.timestamp)}`;
+
+  header.append(title, meta);
+
+  const stage = document.createElement("div");
+  stage.className = "attachments-preview-stage";
+
+  const previewNode = createAttachmentPreviewNode(
+    item.type,
+    mediaUrl,
+    thumbUrl,
+    item.title,
+    item.url,
+    item.thumbUrl,
+  );
+  if (previewNode) {
+    stage.appendChild(previewNode);
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "attachments-preview-empty";
+    empty.textContent = "Для этого вложения предпросмотр недоступен.";
+    stage.appendChild(empty);
+  }
+
+  const hint = document.createElement("p");
+  hint.className = "attachments-preview-hint";
+  hint.textContent = item.messagePreview || "Сообщение без текста";
+
+  const actions = document.createElement("div");
+  actions.className = "attachments-preview-actions";
+
+  if (mediaUrl) {
+    const openOriginal = document.createElement("a");
+    openOriginal.className = "attachments-preview-link";
+    openOriginal.href = mediaUrl;
+    openOriginal.target = "_blank";
+    openOriginal.rel = "noopener noreferrer";
+    openOriginal.textContent = "Открыть оригинал";
+    actions.appendChild(openOriginal);
+  }
+
+  const jumpButton = document.createElement("button");
+  jumpButton.type = "button";
+  jumpButton.dataset.action = "jump-selected";
+  jumpButton.dataset.attachmentId = String(item.id);
+  jumpButton.textContent = "Перейти к сообщению";
+  actions.appendChild(jumpButton);
+
+  dom.attachmentsPreview.append(header, stage, hint, actions);
+}
+
+function createAttachmentPreviewNode(
+  type,
+  mediaUrl,
+  thumbUrl,
+  title,
+  mediaSource = "",
+  thumbSource = "",
+) {
+  if (!mediaUrl && !thumbUrl) {
+    return null;
+  }
+
+  const previewType = detectPreviewType(type, mediaUrl || thumbUrl);
+
+  if (previewType === "image") {
+    const img = document.createElement("img");
+    img.className = "attachments-preview-image";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = title || "Вложение";
+    applyMediaDimensions(img, thumbSource, mediaSource);
+    img.src = mediaUrl || thumbUrl;
+    return img;
+  }
+
+  if (previewType === "video") {
+    if (!mediaUrl) {
+      return null;
+    }
+    const video = document.createElement("video");
+    video.className = "attachments-preview-video";
+    video.controls = true;
+    video.preload = "metadata";
+    if (!applyMediaDimensions(video, mediaSource, thumbSource)) {
+      video.style.aspectRatio = "16 / 9";
+    }
+    video.src = mediaUrl;
+    if (thumbUrl) {
+      video.poster = thumbUrl;
+    }
+    return video;
+  }
+
+  if (previewType === "audio") {
+    if (!mediaUrl) {
+      return null;
+    }
+    const audio = document.createElement("audio");
+    audio.className = "attachments-preview-audio";
+    audio.controls = true;
+    audio.preload = "metadata";
+    audio.src = mediaUrl;
+    return audio;
+  }
+
+  if (previewType === "pdf") {
+    if (!mediaUrl) {
+      return null;
+    }
+    const frame = document.createElement("iframe");
+    frame.className = "attachments-preview-frame";
+    frame.loading = "lazy";
+    frame.src = mediaUrl;
+    frame.title = title || "Документ";
+    return frame;
+  }
+
+  return null;
+}
+
+function detectPreviewType(type, url) {
+  const normalizedType = normalizeAttachmentType(type);
+  if (normalizedType === "image" || normalizedType === "video" || normalizedType === "audio") {
+    return normalizedType;
+  }
+
+  const normalizedUrl = String(url || "").toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp|svg)(?:$|[?#])/.test(normalizedUrl)) {
+    return "image";
+  }
+  if (/\.(mp4|webm|m4v|mov|mkv)(?:$|[?#])/.test(normalizedUrl)) {
+    return "video";
+  }
+  if (/\.(mp3|wav|ogg|m4a|aac|flac)(?:$|[?#])/.test(normalizedUrl)) {
+    return "audio";
+  }
+  if (/\.pdf(?:$|[?#])/.test(normalizedUrl)) {
+    return "pdf";
+  }
+
+  return normalizedType;
+}
+
+function findAttachmentItemById(id) {
+  const parsed = Number(id);
+  if (!Number.isInteger(parsed) || !(state.attachmentsById instanceof Map)) {
+    return null;
+  }
+
+  return state.attachmentsById.get(parsed) || null;
+}
+
+function setSelectedAttachment(id) {
+  const item = findAttachmentItemById(id);
+  if (!item) {
+    return false;
+  }
+
+  state.selectedAttachmentId = item.id;
+  syncAttachmentSelectionUi();
+  renderAttachmentPreview();
+  return true;
+}
+
+function handleAttachmentListClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+
+  const actionTarget = target.closest("[data-action][data-attachment-id]");
+  if (!(actionTarget instanceof Element)) {
+    return;
+  }
+
+  const attachmentId = Number(actionTarget.dataset.attachmentId);
+  if (!Number.isInteger(attachmentId)) {
+    return;
+  }
+
+  const action = String(actionTarget.dataset.action || "");
+  if (action === "preview") {
+    setSelectedAttachment(attachmentId);
+    return;
+  }
+
+  if (action === "jump") {
+    jumpToAttachmentMessage(attachmentId);
+  }
+}
+
+function handleAttachmentPreviewClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+
+  const actionTarget = target.closest('[data-action="jump-selected"][data-attachment-id]');
+  if (!(actionTarget instanceof Element)) {
+    return;
+  }
+
+  const attachmentId = Number(actionTarget.dataset.attachmentId);
+  if (!Number.isInteger(attachmentId)) {
+    return;
+  }
+
+  jumpToAttachmentMessage(attachmentId);
+}
+
+function jumpToAttachmentMessage(attachmentId) {
+  const item = findAttachmentItemById(attachmentId);
+  if (!item) {
+    return;
+  }
+
+  setSelectedAttachment(item.id);
+  closeAttachmentsPanel({ restoreFocus: false });
+
+  state.pinToBottom = false;
+  state.jumpFocusIndex = item.messageIndex;
+
+  if (state.jumpFocusTimeoutId) {
+    clearTimeout(state.jumpFocusTimeoutId);
+  }
+
+  scrollToMessageIndex(item.messageIndex);
+  renderVisibleMessages(true);
+  updateScrollNavButtons();
+
+  state.jumpFocusTimeoutId = setTimeout(() => {
+    state.jumpFocusTimeoutId = null;
+    state.jumpFocusIndex = -1;
+    renderVisibleMessages(true);
+  }, JUMP_FOCUS_TIMEOUT_MS);
+}
+
+function handleChatMediaClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+
+  const mediaTarget = target.closest("[data-media-open='true']");
+  if (!(mediaTarget instanceof Element)) {
+    return;
+  }
+
+  const mediaUrl = String(
+    mediaTarget.getAttribute("data-media-url") || mediaTarget.getAttribute("href") || "",
+  ).trim();
+  if (!mediaUrl) {
+    return;
+  }
+
+  event.preventDefault();
+
+  openMediaViewer({
+    type: String(mediaTarget.getAttribute("data-media-type") || ""),
+    url: mediaUrl,
+    poster: String(mediaTarget.getAttribute("data-media-poster") || ""),
+    title: String(mediaTarget.getAttribute("data-media-title") || "").trim(),
+  });
+}
+
+function openMediaViewer({ type = "", url = "", poster = "", title = "" } = {}) {
+  if (!dom.mediaViewer || !dom.mediaViewerStage) {
+    return;
+  }
+
+  const resolvedUrl = resolveMediaUrl(url);
+  if (!resolvedUrl) {
+    return;
+  }
+
+  const resolvedPoster = poster ? resolveMediaUrl(poster) : "";
+  const resolvedType = detectPreviewType(type, resolvedUrl);
+
+  state.mediaViewerOpen = true;
+  state.mediaViewerType = resolvedType;
+  state.mediaViewerUrl = resolvedUrl;
+  state.mediaViewerPoster = resolvedPoster;
+  state.mediaViewerTitle = title || getAttachmentTypeLabel(type);
+
+  dom.mediaViewer.hidden = false;
+  dom.mediaViewer.setAttribute("aria-hidden", "false");
+  document.body.classList.add("media-viewer-open");
+  renderMediaViewerContent();
+}
+
+function closeMediaViewer({ restoreFocus = false } = {}) {
+  if (!dom.mediaViewer || !dom.mediaViewerStage) {
+    return;
+  }
+
+  state.mediaViewerOpen = false;
+  state.mediaViewerType = "";
+  state.mediaViewerUrl = "";
+  state.mediaViewerPoster = "";
+  state.mediaViewerTitle = "";
+
+  dom.mediaViewer.hidden = true;
+  dom.mediaViewer.setAttribute("aria-hidden", "true");
+  dom.mediaViewerStage.replaceChildren();
+  document.body.classList.remove("media-viewer-open");
+
+  if (restoreFocus) {
+    dom.chatViewport.focus({ preventScroll: true });
+  }
+}
+
+function renderMediaViewerContent() {
+  if (!dom.mediaViewerStage || !dom.mediaViewerLabel || !dom.mediaViewerOpenOriginal) {
+    return;
+  }
+
+  dom.mediaViewerStage.replaceChildren();
+
+  const titleParts = [state.mediaViewerTitle || "Вложение"];
+  if (state.mediaViewerType) {
+    titleParts.push(getAttachmentTypeLabel(state.mediaViewerType));
+  }
+  dom.mediaViewerLabel.textContent = titleParts.join(" · ");
+
+  if (state.mediaViewerUrl) {
+    dom.mediaViewerOpenOriginal.href = state.mediaViewerUrl;
+    dom.mediaViewerOpenOriginal.hidden = false;
+  } else {
+    dom.mediaViewerOpenOriginal.hidden = true;
+    dom.mediaViewerOpenOriginal.removeAttribute("href");
+  }
+
+  const type = state.mediaViewerType;
+  const src = state.mediaViewerUrl;
+
+  if (type === "image") {
+    const image = document.createElement("img");
+    image.src = src;
+    image.alt = state.mediaViewerTitle || "Изображение";
+    dom.mediaViewerStage.appendChild(image);
+    return;
+  }
+
+  if (type === "video") {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.preload = "metadata";
+    video.src = src;
+    if (state.mediaViewerPoster) {
+      video.poster = state.mediaViewerPoster;
+    }
+    dom.mediaViewerStage.appendChild(video);
+    return;
+  }
+
+  const empty = document.createElement("p");
+  empty.className = "media-viewer-empty";
+  empty.textContent = "Для этого типа вложения встроенный просмотр недоступен.";
+  dom.mediaViewerStage.appendChild(empty);
+}
+
 function isIndexInSearchResults(index) {
   const results = state.searchResults;
   let left = 0;
@@ -1352,6 +2127,107 @@ function normalizeRelPath(value) {
     .trim();
 }
 
+function parseDimensionValue(raw) {
+  const value = Number.parseInt(String(raw || "").trim(), 10);
+  if (!Number.isFinite(value) || value < 16 || value > 16384) {
+    return 0;
+  }
+
+  return value;
+}
+
+function parseDimensionToken(raw) {
+  const match = String(raw || "").trim().match(/^(\d{2,5})[xX](\d{2,5})$/);
+  if (!match) {
+    return null;
+  }
+
+  const width = parseDimensionValue(match[1]);
+  const height = parseDimensionValue(match[2]);
+  if (!width || !height) {
+    return null;
+  }
+
+  return { width, height };
+}
+
+function extractMediaDimensions(rawUrl) {
+  const source = String(rawUrl || "").replace(/&amp;/g, "&").trim();
+  if (!source) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(source, "https://chat-emulator.local");
+    const sizeKeys = ["size", "dimensions", "dim", "resolution", "res"];
+
+    for (const key of sizeKeys) {
+      const dimensions = parseDimensionToken(parsed.searchParams.get(key));
+      if (dimensions) {
+        return dimensions;
+      }
+    }
+
+    const width = parseDimensionValue(
+      parsed.searchParams.get("w") || parsed.searchParams.get("width"),
+    );
+    const height = parseDimensionValue(
+      parsed.searchParams.get("h") || parsed.searchParams.get("height"),
+    );
+    if (width && height) {
+      return { width, height };
+    }
+  } catch {
+    // Ignore malformed URLs and keep regex fallback below.
+  }
+
+  const inlineTokenMatch = source.match(
+    /(?:^|[?&#/])(?:size|dimensions|dim|resolution|res)=([0-9]{2,5})x([0-9]{2,5})(?:$|[&#])/i,
+  );
+  if (!inlineTokenMatch) {
+    return null;
+  }
+
+  const width = parseDimensionValue(inlineTokenMatch[1]);
+  const height = parseDimensionValue(inlineTokenMatch[2]);
+  if (!width || !height) {
+    return null;
+  }
+
+  return { width, height };
+}
+
+function pickMediaDimensions(...candidates) {
+  for (const candidate of candidates) {
+    const dimensions = extractMediaDimensions(candidate);
+    if (dimensions) {
+      return dimensions;
+    }
+  }
+
+  return null;
+}
+
+function applyMediaDimensions(node, ...candidates) {
+  if (!(node instanceof HTMLElement)) {
+    return null;
+  }
+
+  const dimensions = pickMediaDimensions(...candidates);
+  if (!dimensions) {
+    return null;
+  }
+
+  node.style.aspectRatio = `${dimensions.width} / ${dimensions.height}`;
+
+  if (node instanceof HTMLImageElement) {
+    node.width = dimensions.width;
+    node.height = dimensions.height;
+  }
+
+  return dimensions;
+}
+
 function isProbablyAbsoluteUrl(value) {
   return /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(value);
 }
@@ -1406,12 +2282,18 @@ function renderAttachments(attachments) {
       link.href = full || thumb;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
+      link.dataset.mediaOpen = "true";
+      link.dataset.mediaType = "image";
+      link.dataset.mediaUrl = full || thumb;
+      link.dataset.mediaPoster = "";
+      link.dataset.mediaTitle = title || "Изображение";
 
       const img = document.createElement("img");
       img.className = "attachment-image";
       img.loading = "lazy";
       img.decoding = "async";
       img.alt = title || "Изображение";
+      applyMediaDimensions(img, attachment.thumbUrl, attachment.url);
       img.src = thumb || full;
       img.addEventListener("load", () => scheduleMeasurement(), { once: true });
 
@@ -1431,12 +2313,30 @@ function renderAttachments(attachments) {
       video.className = "attachment-video";
       video.controls = true;
       video.preload = "metadata";
+      if (!applyMediaDimensions(video, attachment.url, attachment.thumbUrl)) {
+        video.style.aspectRatio = "16 / 9";
+      }
       video.src = src;
       if (poster) {
         video.poster = poster;
       }
       video.addEventListener("loadedmetadata", () => scheduleMeasurement(), { once: true });
       wrap.appendChild(video);
+
+      const actions = document.createElement("div");
+      actions.className = "attachment-media-actions";
+
+      const openInlineButton = document.createElement("button");
+      openInlineButton.type = "button";
+      openInlineButton.className = "attachment-inline-open";
+      openInlineButton.textContent = "Открыть в окне";
+      openInlineButton.dataset.mediaOpen = "true";
+      openInlineButton.dataset.mediaType = "video";
+      openInlineButton.dataset.mediaUrl = src;
+      openInlineButton.dataset.mediaPoster = poster || "";
+      openInlineButton.dataset.mediaTitle = title || "Видео";
+      actions.appendChild(openInlineButton);
+      wrap.appendChild(actions);
       continue;
     }
 
