@@ -47,11 +47,11 @@ const dom = {
   attachmentsCount: document.querySelector("#attachmentsCount"),
   attachmentsMediaOnlyToggle: document.querySelector("#attachmentsMediaOnlyToggle"),
   attachmentsList: document.querySelector("#attachmentsList"),
-  attachmentsPreview: document.querySelector("#attachmentsPreview"),
   mediaViewer: document.querySelector("#mediaViewer"),
   closeMediaViewerBtn: document.querySelector("#closeMediaViewerBtn"),
   mediaViewerPrevBtn: document.querySelector("#mediaViewerPrevBtn"),
   mediaViewerNextBtn: document.querySelector("#mediaViewerNextBtn"),
+  mediaViewerJumpBtn: document.querySelector("#mediaViewerJumpBtn"),
   mediaViewerLabel: document.querySelector("#mediaViewerLabel"),
   mediaViewerOpenOriginal: document.querySelector("#mediaViewerOpenOriginal"),
   mediaViewerStage: document.querySelector("#mediaViewerStage"),
@@ -89,11 +89,13 @@ const state = {
   attachmentsIndex: [],
   attachmentsViewIndex: [],
   attachmentsById: new Map(),
-  attachmentsMediaOnly: false,
+  attachmentsMediaOnly: true,
   attachmentsRenderToken: 0,
   attachmentsRenderItems: [],
   attachmentsRenderedCount: 0,
   attachmentsRenderQueued: false,
+  attachmentsListScrollTop: 0,
+  attachmentsListRestorePending: false,
   selectedAttachmentId: null,
   attachmentsOpen: false,
   jumpFocusIndex: -1,
@@ -278,11 +280,11 @@ function attachEvents() {
   dom.attachmentsList?.addEventListener(
     "scroll",
     () => {
+      state.attachmentsListScrollTop = dom.attachmentsList?.scrollTop ?? state.attachmentsListScrollTop;
       maybeAppendAttachmentCards();
     },
     { passive: true },
   );
-  dom.attachmentsPreview?.addEventListener("click", handleAttachmentPreviewClick);
   dom.attachmentsMediaOnlyToggle?.addEventListener("change", handleAttachmentsMediaOnlyToggle);
   dom.chatCanvas.addEventListener("click", handleChatMediaClick);
 
@@ -296,6 +298,9 @@ function attachEvents() {
   });
   dom.mediaViewerNextBtn?.addEventListener("click", () => {
     stepMediaViewer(1);
+  });
+  dom.mediaViewerJumpBtn?.addEventListener("click", () => {
+    jumpFromMediaViewerToMessage();
   });
   dom.closeMediaViewerBtn?.addEventListener("click", () => {
     closeMediaViewer();
@@ -554,12 +559,17 @@ function hydrateConversation(payload) {
   state.attachmentsById = attachmentsById;
   state.mediaAttachments = mediaItems;
   state.mediaAttachmentPosById = mediaPositionById;
-  state.attachmentsMediaOnly = false;
+  state.attachmentsMediaOnly = true;
   state.attachmentsRenderToken = 0;
+  state.attachmentsRenderItems = [];
+  state.attachmentsRenderedCount = 0;
+  state.attachmentsRenderQueued = false;
+  state.attachmentsListScrollTop = 0;
+  state.attachmentsListRestorePending = false;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
   state.mediaViewerAttachmentId = null;
   if (dom.attachmentsMediaOnlyToggle) {
-    dom.attachmentsMediaOnlyToggle.checked = false;
+    dom.attachmentsMediaOnlyToggle.checked = true;
   }
 
   if (!state.messages.length) {
@@ -664,11 +674,13 @@ function resetConversationState() {
   state.attachmentsIndex = [];
   state.attachmentsViewIndex = [];
   state.attachmentsById = new Map();
-  state.attachmentsMediaOnly = false;
+  state.attachmentsMediaOnly = true;
   state.attachmentsRenderToken = 0;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsListScrollTop = 0;
+  state.attachmentsListRestorePending = false;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
   state.jumpFocusIndex = -1;
@@ -693,7 +705,7 @@ function resetConversationState() {
   dom.scrollToTopBtn.disabled = true;
   dom.scrollToBottomBtn.disabled = true;
   if (dom.attachmentsMediaOnlyToggle) {
-    dom.attachmentsMediaOnlyToggle.checked = false;
+    dom.attachmentsMediaOnlyToggle.checked = true;
     dom.attachmentsMediaOnlyToggle.disabled = true;
   }
 
@@ -1427,6 +1439,10 @@ function buildAttachmentsIndex(messages) {
         continue;
       }
 
+      if (isStickerLikeAttachment(type, url, thumbUrl, title)) {
+        continue;
+      }
+
       const item = {
         id: nextId,
         type,
@@ -1502,6 +1518,19 @@ function getAttachmentTypeLabel(type) {
 
 function formatTimestamp(value) {
   return Number.isFinite(value) ? dateFormatter.format(value) : "без времени";
+}
+
+function isStickerLikeAttachment(type, url, thumbUrl, title) {
+  if (normalizeAttachmentType(type) !== "image") {
+    return false;
+  }
+
+  const source = `${String(url || "")}\n${String(thumbUrl || "")}\n${String(title || "")}`.toLowerCase();
+  if (!source) {
+    return false;
+  }
+
+  return /\bsticker(s)?\b/.test(source) || /\/sticker(?:s|pack)?(?:\/|$|\?|#)/.test(source);
 }
 
 function isPrimaryMediaAttachment(type) {
@@ -1587,7 +1616,6 @@ function updateAttachmentsUi() {
   if (!totalCount) {
     state.selectedAttachmentId = null;
     renderAttachmentList();
-    renderAttachmentPreview();
 
     if (state.attachmentsOpen) {
       closeAttachmentsPanel({ restoreFocus: false });
@@ -1616,7 +1644,7 @@ function openAttachmentsPanel() {
 
   ensureSelectedAttachmentVisible();
 
-  renderAttachmentsPanel();
+  renderAttachmentsPanel({ preserveScroll: false });
 }
 
 function closeAttachmentsPanel({ restoreFocus = true } = {}) {
@@ -1624,10 +1652,15 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
     return;
   }
 
+  if (state.attachmentsOpen && dom.attachmentsList) {
+    state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+  }
+
   state.attachmentsRenderToken += 1;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsListRestorePending = false;
   state.attachmentsOpen = false;
   dom.attachmentsPanel.hidden = true;
   dom.attachmentsPanel.setAttribute("aria-hidden", "true");
@@ -1638,13 +1671,15 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
   }
 }
 
-function renderAttachmentsPanel() {
+function renderAttachmentsPanel({ preserveScroll = true } = {}) {
   ensureSelectedAttachmentVisible();
-  renderAttachmentList();
-  renderAttachmentPreview();
+  if (preserveScroll && dom.attachmentsList) {
+    state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+  }
+  renderAttachmentList({ restoreScroll: state.attachmentsOpen });
 }
 
-function renderAttachmentList() {
+function renderAttachmentList({ restoreScroll = false } = {}) {
   if (!dom.attachmentsList) {
     return;
   }
@@ -1654,9 +1689,12 @@ function renderAttachmentList() {
   state.attachmentsRenderItems = items;
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsListRestorePending = Boolean(restoreScroll && state.attachmentsOpen);
   dom.attachmentsList.replaceChildren();
+  dom.attachmentsList.scrollTop = 0;
 
   if (!items.length) {
+    state.attachmentsListRestorePending = false;
     const empty = document.createElement("p");
     empty.className = "attachments-list-empty";
     empty.textContent =
@@ -1720,6 +1758,10 @@ function appendAttachmentCardsBatch({ initial = false } = {}) {
     syncAttachmentSelectionUi();
   }
 
+  if (restoreAttachmentListScrollIfNeeded(token)) {
+    return;
+  }
+
   if (
     limit < total &&
     dom.attachmentsList.scrollHeight <= dom.attachmentsList.clientHeight + ATTACHMENTS_LOAD_AHEAD_PX
@@ -1733,6 +1775,43 @@ function appendAttachmentCardsBatch({ initial = false } = {}) {
       appendAttachmentCardsBatch();
     });
   }
+}
+
+function restoreAttachmentListScrollIfNeeded(token) {
+  if (!dom.attachmentsList || !state.attachmentsListRestorePending) {
+    return false;
+  }
+
+  if (token !== state.attachmentsRenderToken) {
+    return true;
+  }
+
+  const targetScrollTop = Math.max(0, Number(state.attachmentsListScrollTop) || 0);
+  const maxScrollTop = Math.max(0, dom.attachmentsList.scrollHeight - dom.attachmentsList.clientHeight);
+  const total = Array.isArray(state.attachmentsRenderItems) ? state.attachmentsRenderItems.length : 0;
+  const renderedAll = state.attachmentsRenderedCount >= total;
+
+  if (targetScrollTop <= 0 || maxScrollTop >= targetScrollTop || renderedAll) {
+    dom.attachmentsList.scrollTop = Math.min(targetScrollTop, maxScrollTop);
+    state.attachmentsListRestorePending = false;
+    maybeAppendAttachmentCards();
+    return false;
+  }
+
+  if (state.attachmentsRenderQueued) {
+    return true;
+  }
+
+  state.attachmentsRenderQueued = true;
+  requestAnimationFrame(() => {
+    state.attachmentsRenderQueued = false;
+    if (token !== state.attachmentsRenderToken) {
+      return;
+    }
+    appendAttachmentCardsBatch();
+  });
+
+  return true;
 }
 
 function createAttachmentListCard(item) {
@@ -1880,160 +1959,6 @@ function openAttachmentInViewer(attachmentId) {
   });
 }
 
-function renderAttachmentPreview() {
-  if (!dom.attachmentsPreview) {
-    return;
-  }
-
-  const item = findAttachmentItemById(state.selectedAttachmentId);
-  dom.attachmentsPreview.replaceChildren();
-
-  if (!item) {
-    const empty = document.createElement("p");
-    empty.className = "attachments-preview-empty";
-    empty.textContent =
-      state.attachmentsIndex.length && state.attachmentsMediaOnly
-        ? "По фильтру «Исключить лишнее» сейчас нет вложений для просмотра."
-        : state.attachmentsIndex.length
-          ? "Выберите вложение в сетке, чтобы посмотреть его."
-          : "Вложения отсутствуют.";
-    dom.attachmentsPreview.appendChild(empty);
-    return;
-  }
-
-  const mediaUrl = resolveMediaUrl(item.url);
-  const thumbUrl = resolveMediaUrl(item.thumbUrl || item.url);
-
-  const header = document.createElement("div");
-  header.className = "attachments-preview-header";
-
-  const title = document.createElement("h3");
-  title.className = "attachments-preview-title";
-  title.textContent = item.title || getAttachmentTypeLabel(item.type);
-
-  const meta = document.createElement("p");
-  meta.className = "attachments-preview-meta";
-  meta.textContent = `${getAttachmentTypeLabel(item.type)} · ${item.sender} · ${formatTimestamp(item.timestamp)}`;
-
-  header.append(title, meta);
-
-  const stage = document.createElement("div");
-  stage.className = "attachments-preview-stage";
-
-  const previewNode = createAttachmentPreviewNode(
-    item.type,
-    mediaUrl,
-    thumbUrl,
-    item.title,
-    item.url,
-    item.thumbUrl,
-  );
-  if (previewNode) {
-    stage.appendChild(previewNode);
-  } else {
-    const empty = document.createElement("p");
-    empty.className = "attachments-preview-empty";
-    empty.textContent = "Для этого вложения предпросмотр недоступен.";
-    stage.appendChild(empty);
-  }
-
-  const hint = document.createElement("p");
-  hint.className = "attachments-preview-hint";
-  hint.textContent = item.messagePreview || "Сообщение без текста";
-
-  const actions = document.createElement("div");
-  actions.className = "attachments-preview-actions";
-
-  if (mediaUrl) {
-    const openOriginal = document.createElement("a");
-    openOriginal.className = "attachments-preview-link";
-    openOriginal.href = mediaUrl;
-    openOriginal.target = "_blank";
-    openOriginal.rel = "noopener noreferrer";
-    openOriginal.textContent = "Открыть оригинал";
-    actions.appendChild(openOriginal);
-  }
-
-  const jumpButton = document.createElement("button");
-  jumpButton.type = "button";
-  jumpButton.dataset.action = "jump-selected";
-  jumpButton.dataset.attachmentId = String(item.id);
-  jumpButton.textContent = "Перейти к сообщению";
-  actions.appendChild(jumpButton);
-
-  dom.attachmentsPreview.append(header, stage, hint, actions);
-}
-
-function createAttachmentPreviewNode(
-  type,
-  mediaUrl,
-  thumbUrl,
-  title,
-  mediaSource = "",
-  thumbSource = "",
-) {
-  if (!mediaUrl && !thumbUrl) {
-    return null;
-  }
-
-  const previewType = detectPreviewType(type, mediaUrl || thumbUrl);
-
-  if (previewType === "image") {
-    const img = document.createElement("img");
-    img.className = "attachments-preview-image";
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.alt = title || "Вложение";
-    applyMediaDimensions(img, thumbSource, mediaSource);
-    img.src = mediaUrl || thumbUrl;
-    return img;
-  }
-
-  if (previewType === "video") {
-    if (!mediaUrl) {
-      return null;
-    }
-    const video = document.createElement("video");
-    video.className = "attachments-preview-video";
-    video.controls = true;
-    video.preload = "metadata";
-    if (!applyMediaDimensions(video, mediaSource, thumbSource)) {
-      video.style.aspectRatio = "16 / 9";
-    }
-    video.src = mediaUrl;
-    if (thumbUrl) {
-      video.poster = thumbUrl;
-    }
-    return video;
-  }
-
-  if (previewType === "audio") {
-    if (!mediaUrl) {
-      return null;
-    }
-    const audio = document.createElement("audio");
-    audio.className = "attachments-preview-audio";
-    audio.controls = true;
-    audio.preload = "metadata";
-    audio.src = mediaUrl;
-    return audio;
-  }
-
-  if (previewType === "pdf") {
-    if (!mediaUrl) {
-      return null;
-    }
-    const frame = document.createElement("iframe");
-    frame.className = "attachments-preview-frame";
-    frame.loading = "lazy";
-    frame.src = mediaUrl;
-    frame.title = title || "Документ";
-    return frame;
-  }
-
-  return null;
-}
-
 function detectPreviewType(type, url) {
   const normalizedType = normalizeAttachmentType(type);
   if (normalizedType === "image" || normalizedType === "video" || normalizedType === "audio") {
@@ -2089,7 +2014,6 @@ function setSelectedAttachment(id) {
 
   state.selectedAttachmentId = item.id;
   syncAttachmentSelectionUi();
-  renderAttachmentPreview();
   return true;
 }
 
@@ -2110,12 +2034,7 @@ function handleAttachmentListClick(event) {
   }
 
   const action = String(actionTarget.dataset.action || "");
-  if (action === "preview") {
-    setSelectedAttachment(attachmentId);
-    return;
-  }
-
-  if (action === "open-media") {
+  if (action === "preview" || action === "open-media") {
     setSelectedAttachment(attachmentId);
     openAttachmentInViewer(attachmentId);
     return;
@@ -2124,25 +2043,6 @@ function handleAttachmentListClick(event) {
   if (action === "jump") {
     jumpToAttachmentMessage(attachmentId);
   }
-}
-
-function handleAttachmentPreviewClick(event) {
-  const target = event.target;
-  if (!(target instanceof Element)) {
-    return;
-  }
-
-  const actionTarget = target.closest('[data-action="jump-selected"][data-attachment-id]');
-  if (!(actionTarget instanceof Element)) {
-    return;
-  }
-
-  const attachmentId = Number(actionTarget.dataset.attachmentId);
-  if (!Number.isInteger(attachmentId)) {
-    return;
-  }
-
-  jumpToAttachmentMessage(attachmentId);
 }
 
 function jumpToAttachmentMessage(attachmentId) {
@@ -2265,6 +2165,16 @@ function stepMediaViewer(direction) {
   });
 }
 
+function jumpFromMediaViewerToMessage() {
+  const attachmentId = Number(state.mediaViewerAttachmentId);
+  if (!Number.isInteger(attachmentId)) {
+    return;
+  }
+
+  closeMediaViewer({ restoreFocus: false });
+  jumpToAttachmentMessage(attachmentId);
+}
+
 function handleChatMediaClick(event) {
   const target = event.target;
   if (!(target instanceof Element)) {
@@ -2371,6 +2281,12 @@ function renderMediaViewerContent() {
   } else {
     dom.mediaViewerOpenOriginal.hidden = true;
     dom.mediaViewerOpenOriginal.removeAttribute("href");
+  }
+
+  if (dom.mediaViewerJumpBtn) {
+    const linkedAttachmentId = Number(state.mediaViewerAttachmentId);
+    const hasLinkedMessage = Number.isInteger(linkedAttachmentId);
+    dom.mediaViewerJumpBtn.disabled = !hasLinkedMessage;
   }
   updateMediaViewerNavButtons();
 

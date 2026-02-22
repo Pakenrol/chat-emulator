@@ -112,7 +112,7 @@
           </div>
           <div class="attachments-header-actions">
             <label class="attachments-filter-toggle" for="attachmentsMediaOnlyToggle">
-              <input id="attachmentsMediaOnlyToggle" type="checkbox" />
+              <input id="attachmentsMediaOnlyToggle" type="checkbox" checked />
               <span>Исключить лишнее</span>
             </label>
             <button id="closeAttachmentsBtn" type="button">Закрыть</button>
@@ -121,7 +121,6 @@
 
         <div class="attachments-content">
           <div id="attachmentsList" class="attachments-list"></div>
-          <div id="attachmentsPreview" class="attachments-preview"></div>
         </div>
       </div>
     </section>
@@ -145,6 +144,7 @@
             <button id="mediaViewerNextBtn" type="button" aria-label="Следующее вложение">
               Вперёд
             </button>
+            <button id="mediaViewerJumpBtn" type="button">К сообщению</button>
             <a
               id="mediaViewerOpenOriginal"
               class="media-viewer-open-original"
