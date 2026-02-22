@@ -502,6 +502,12 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.attachments-scroll-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
 .attachments-filter-toggle {
   display: inline-flex;
   align-items: center;

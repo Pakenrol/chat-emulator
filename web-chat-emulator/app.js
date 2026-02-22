@@ -46,6 +46,8 @@ const dom = {
   closeAttachmentsBtn: document.querySelector("#closeAttachmentsBtn"),
   attachmentsCount: document.querySelector("#attachmentsCount"),
   attachmentsMediaOnlyToggle: document.querySelector("#attachmentsMediaOnlyToggle"),
+  attachmentsScrollTopBtn: document.querySelector("#attachmentsScrollTopBtn"),
+  attachmentsScrollBottomBtn: document.querySelector("#attachmentsScrollBottomBtn"),
   attachmentsList: document.querySelector("#attachmentsList"),
   mediaViewer: document.querySelector("#mediaViewer"),
   closeMediaViewerBtn: document.querySelector("#closeMediaViewerBtn"),
@@ -95,6 +97,7 @@ const state = {
   attachmentsRenderedCount: 0,
   attachmentsRenderQueued: false,
   attachmentsListScrollTop: 0,
+  attachmentsListRestoreTarget: 0,
   attachmentsListRestorePending: false,
   selectedAttachmentId: null,
   attachmentsOpen: false,
@@ -280,12 +283,20 @@ function attachEvents() {
   dom.attachmentsList?.addEventListener(
     "scroll",
     () => {
-      state.attachmentsListScrollTop = dom.attachmentsList?.scrollTop ?? state.attachmentsListScrollTop;
+      if (!state.attachmentsListRestorePending) {
+        state.attachmentsListScrollTop = dom.attachmentsList?.scrollTop ?? state.attachmentsListScrollTop;
+      }
       maybeAppendAttachmentCards();
     },
     { passive: true },
   );
   dom.attachmentsMediaOnlyToggle?.addEventListener("change", handleAttachmentsMediaOnlyToggle);
+  dom.attachmentsScrollTopBtn?.addEventListener("click", () => {
+    scrollAttachmentsListToTop();
+  });
+  dom.attachmentsScrollBottomBtn?.addEventListener("click", () => {
+    scrollAttachmentsListToBottom();
+  });
   dom.chatCanvas.addEventListener("click", handleChatMediaClick);
 
   dom.mediaViewer?.addEventListener("click", (event) => {
@@ -565,6 +576,7 @@ function hydrateConversation(payload) {
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
   state.attachmentsListScrollTop = 0;
+  state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
   state.mediaViewerAttachmentId = null;
@@ -680,6 +692,7 @@ function resetConversationState() {
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
   state.attachmentsListScrollTop = 0;
+  state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
@@ -707,6 +720,12 @@ function resetConversationState() {
   if (dom.attachmentsMediaOnlyToggle) {
     dom.attachmentsMediaOnlyToggle.checked = true;
     dom.attachmentsMediaOnlyToggle.disabled = true;
+  }
+  if (dom.attachmentsScrollTopBtn) {
+    dom.attachmentsScrollTopBtn.disabled = true;
+  }
+  if (dom.attachmentsScrollBottomBtn) {
+    dom.attachmentsScrollBottomBtn.disabled = true;
   }
 
   closeAttachmentsPanel({ restoreFocus: false });
@@ -1590,6 +1609,12 @@ function updateAttachmentsUi() {
     dom.attachmentsMediaOnlyToggle.checked = state.attachmentsMediaOnly;
     dom.attachmentsMediaOnlyToggle.disabled = totalCount === 0;
   }
+  if (dom.attachmentsScrollTopBtn) {
+    dom.attachmentsScrollTopBtn.disabled = totalCount === 0;
+  }
+  if (dom.attachmentsScrollBottomBtn) {
+    dom.attachmentsScrollBottomBtn.disabled = totalCount === 0;
+  }
 
   if (dom.openAttachmentsBtn) {
     dom.openAttachmentsBtn.disabled = totalCount === 0;
@@ -1660,6 +1685,7 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.attachmentsOpen = false;
   dom.attachmentsPanel.hidden = true;
@@ -1673,7 +1699,7 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
 
 function renderAttachmentsPanel({ preserveScroll = true } = {}) {
   ensureSelectedAttachmentVisible();
-  if (preserveScroll && dom.attachmentsList) {
+  if (preserveScroll && dom.attachmentsList && !state.attachmentsListRestorePending) {
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
   }
   renderAttachmentList({ restoreScroll: state.attachmentsOpen });
@@ -1690,10 +1716,14 @@ function renderAttachmentList({ restoreScroll = false } = {}) {
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
   state.attachmentsListRestorePending = Boolean(restoreScroll && state.attachmentsOpen);
+  state.attachmentsListRestoreTarget = state.attachmentsListRestorePending
+    ? Math.max(0, Number(state.attachmentsListScrollTop) || 0)
+    : 0;
   dom.attachmentsList.replaceChildren();
   dom.attachmentsList.scrollTop = 0;
 
   if (!items.length) {
+    state.attachmentsListRestoreTarget = 0;
     state.attachmentsListRestorePending = false;
     const empty = document.createElement("p");
     empty.className = "attachments-list-empty";
@@ -1721,6 +1751,42 @@ function maybeAppendAttachmentCards() {
   if (remaining <= ATTACHMENTS_LOAD_AHEAD_PX) {
     appendAttachmentCardsBatch();
   }
+}
+
+function scrollAttachmentsListToTop() {
+  if (!dom.attachmentsList || !state.attachmentsOpen) {
+    return;
+  }
+
+  dom.attachmentsList.scrollTop = 0;
+  state.attachmentsListScrollTop = 0;
+}
+
+function scrollAttachmentsListToBottom() {
+  if (!dom.attachmentsList || !state.attachmentsOpen) {
+    return;
+  }
+
+  const token = state.attachmentsRenderToken;
+
+  const step = () => {
+    if (!dom.attachmentsList || !state.attachmentsOpen || token !== state.attachmentsRenderToken) {
+      return;
+    }
+
+    const total = Array.isArray(state.attachmentsRenderItems) ? state.attachmentsRenderItems.length : 0;
+    dom.attachmentsList.scrollTop = dom.attachmentsList.scrollHeight;
+    state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+
+    if (state.attachmentsRenderedCount >= total) {
+      return;
+    }
+
+    appendAttachmentCardsBatch();
+    requestAnimationFrame(step);
+  };
+
+  step();
 }
 
 function appendAttachmentCardsBatch({ initial = false } = {}) {
@@ -1786,13 +1852,15 @@ function restoreAttachmentListScrollIfNeeded(token) {
     return true;
   }
 
-  const targetScrollTop = Math.max(0, Number(state.attachmentsListScrollTop) || 0);
+  const targetScrollTop = Math.max(0, Number(state.attachmentsListRestoreTarget) || 0);
   const maxScrollTop = Math.max(0, dom.attachmentsList.scrollHeight - dom.attachmentsList.clientHeight);
   const total = Array.isArray(state.attachmentsRenderItems) ? state.attachmentsRenderItems.length : 0;
   const renderedAll = state.attachmentsRenderedCount >= total;
 
   if (targetScrollTop <= 0 || maxScrollTop >= targetScrollTop || renderedAll) {
     dom.attachmentsList.scrollTop = Math.min(targetScrollTop, maxScrollTop);
+    state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+    state.attachmentsListRestoreTarget = 0;
     state.attachmentsListRestorePending = false;
     maybeAppendAttachmentCards();
     return false;
