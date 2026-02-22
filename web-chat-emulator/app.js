@@ -102,6 +102,7 @@ const state = {
   attachmentsListScrollTop: 0,
   attachmentsListRestoreTarget: 0,
   attachmentsListRestorePending: false,
+  attachmentsLastJumpedId: null,
   selectedAttachmentId: null,
   attachmentsOpen: false,
   jumpFocusIndex: -1,
@@ -583,6 +584,7 @@ function hydrateConversation(payload) {
   state.attachmentsListScrollTop = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
+  state.attachmentsLastJumpedId = null;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
   state.mediaViewerAttachmentId = null;
   if (dom.attachmentsMediaOnlyToggle) {
@@ -701,6 +703,7 @@ function resetConversationState() {
   state.attachmentsListScrollTop = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
+  state.attachmentsLastJumpedId = null;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
   state.jumpFocusIndex = -1;
@@ -1588,6 +1591,42 @@ function getVisibleAttachments() {
   return Array.isArray(state.attachmentsViewIndex) ? state.attachmentsViewIndex : [];
 }
 
+function getVisibleAttachmentIndexById(attachmentId) {
+  const parsedId = Number(attachmentId);
+  if (!Number.isInteger(parsedId)) {
+    return -1;
+  }
+
+  const visibleItems = getVisibleAttachments();
+  for (let index = 0; index < visibleItems.length; index += 1) {
+    if (visibleItems[index]?.id === parsedId) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function tryApplyLastJumpedAttachmentAnchor() {
+  const anchorId = Number(state.attachmentsLastJumpedId);
+  if (!Number.isInteger(anchorId)) {
+    return false;
+  }
+
+  const visibleIndex = getVisibleAttachmentIndexById(anchorId);
+  if (visibleIndex < 0) {
+    return false;
+  }
+
+  state.selectedAttachmentId = anchorId;
+  const anchorWindowOffset = Math.floor(ATTACHMENTS_END_TELEPORT_WINDOW / 2);
+  state.attachmentsListStartIndex = Math.max(0, visibleIndex - anchorWindowOffset);
+  state.attachmentsListScrollTop = 0;
+  state.attachmentsListRestoreTarget = 0;
+  state.attachmentsListRestorePending = false;
+  return true;
+}
+
 function ensureSelectedAttachmentVisible() {
   const visibleItems = getVisibleAttachments();
   if (!visibleItems.length) {
@@ -1681,7 +1720,7 @@ function openAttachmentsPanel() {
 
   ensureSelectedAttachmentVisible();
 
-  renderAttachmentsPanel({ preserveScroll: false });
+  renderAttachmentsPanel({ preserveScroll: false, preferLastJumpAnchor: true });
 }
 
 function closeAttachmentsPanel({ restoreFocus = true } = {}) {
@@ -1711,13 +1750,21 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
   }
 }
 
-function renderAttachmentsPanel({ preserveScroll = true } = {}) {
+function renderAttachmentsPanel({ preserveScroll = true, preferLastJumpAnchor = false } = {}) {
   ensureSelectedAttachmentVisible();
+  let restoreScroll = state.attachmentsOpen;
+  let startIndex = null;
+
+  if (preferLastJumpAnchor && tryApplyLastJumpedAttachmentAnchor()) {
+    restoreScroll = false;
+    startIndex = state.attachmentsListStartIndex;
+  }
+
   if (preserveScroll && dom.attachmentsList && !state.attachmentsListRestorePending) {
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
     state.attachmentsListStartIndex = state.attachmentsRenderStartIndex;
   }
-  renderAttachmentList({ restoreScroll: state.attachmentsOpen });
+  renderAttachmentList({ restoreScroll, startIndex });
 }
 
 function renderAttachmentList({ restoreScroll = false, startIndex = null } = {}) {
@@ -2149,6 +2196,7 @@ function jumpToAttachmentMessage(attachmentId) {
     return;
   }
 
+  state.attachmentsLastJumpedId = item.id;
   setSelectedAttachment(item.id);
   closeAttachmentsPanel({ restoreFocus: false });
 
