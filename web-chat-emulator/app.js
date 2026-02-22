@@ -7,6 +7,7 @@ const ATTACHMENTS_RENDER_CHUNK_SIZE = 40;
 const ATTACHMENTS_INITIAL_BATCH_SIZE = 60;
 const ATTACHMENTS_LOAD_AHEAD_PX = 500;
 const ATTACHMENTS_END_TELEPORT_WINDOW = 160;
+const ATTACHMENTS_PREPEND_CHUNK_SIZE = 80;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -103,6 +104,7 @@ const state = {
   attachmentsListRestoreTarget: 0,
   attachmentsListRestorePending: false,
   attachmentsLastJumpedId: null,
+  attachmentsPendingRevealId: null,
   selectedAttachmentId: null,
   attachmentsOpen: false,
   jumpFocusIndex: -1,
@@ -585,6 +587,7 @@ function hydrateConversation(payload) {
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.attachmentsLastJumpedId = null;
+  state.attachmentsPendingRevealId = null;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
   state.mediaViewerAttachmentId = null;
   if (dom.attachmentsMediaOnlyToggle) {
@@ -704,6 +707,7 @@ function resetConversationState() {
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.attachmentsLastJumpedId = null;
+  state.attachmentsPendingRevealId = null;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
   state.jumpFocusIndex = -1;
@@ -1610,11 +1614,13 @@ function getVisibleAttachmentIndexById(attachmentId) {
 function tryApplyLastJumpedAttachmentAnchor() {
   const anchorId = Number(state.attachmentsLastJumpedId);
   if (!Number.isInteger(anchorId)) {
+    state.attachmentsPendingRevealId = null;
     return false;
   }
 
   const visibleIndex = getVisibleAttachmentIndexById(anchorId);
   if (visibleIndex < 0) {
+    state.attachmentsPendingRevealId = null;
     return false;
   }
 
@@ -1624,6 +1630,7 @@ function tryApplyLastJumpedAttachmentAnchor() {
   state.attachmentsListScrollTop = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
+  state.attachmentsPendingRevealId = anchorId;
   return true;
 }
 
@@ -1690,6 +1697,7 @@ function updateAttachmentsUi() {
     state.attachmentsListScrollTop = 0;
     state.attachmentsListRestoreTarget = 0;
     state.attachmentsListRestorePending = false;
+    state.attachmentsPendingRevealId = null;
     state.selectedAttachmentId = null;
     renderAttachmentList();
 
@@ -1798,6 +1806,7 @@ function renderAttachmentList({ restoreScroll = false, startIndex = null } = {})
     state.attachmentsListStartIndex = 0;
     state.attachmentsListRestoreTarget = 0;
     state.attachmentsListRestorePending = false;
+    state.attachmentsPendingRevealId = null;
     const empty = document.createElement("p");
     empty.className = "attachments-list-empty";
     empty.textContent =
@@ -1816,6 +1825,14 @@ function maybeAppendAttachmentCards() {
     return;
   }
 
+  if (
+    state.attachmentsRenderStartIndex > 0 &&
+    dom.attachmentsList.scrollTop <= ATTACHMENTS_LOAD_AHEAD_PX
+  ) {
+    prependAttachmentCardsBatch();
+    return;
+  }
+
   const remaining =
     dom.attachmentsList.scrollHeight -
     dom.attachmentsList.clientHeight -
@@ -1826,11 +1843,60 @@ function maybeAppendAttachmentCards() {
   }
 }
 
+function prependAttachmentCardsBatch() {
+  if (!dom.attachmentsList) {
+    return;
+  }
+
+  const token = state.attachmentsRenderToken;
+  const items = state.attachmentsRenderItems;
+  const total = Array.isArray(items) ? items.length : 0;
+  const currentStart = Math.max(0, Number(state.attachmentsRenderStartIndex) || 0);
+  if (!total || currentStart <= 0) {
+    return;
+  }
+
+  const nextStart = Math.max(0, currentStart - ATTACHMENTS_PREPEND_CHUNK_SIZE);
+  const previousHeight = dom.attachmentsList.scrollHeight;
+  const previousTop = dom.attachmentsList.scrollTop;
+
+  const fragment = document.createDocumentFragment();
+  let appendedSelected = false;
+  const selectedId = Number(state.selectedAttachmentId);
+
+  for (let index = nextStart; index < currentStart; index += 1) {
+    const item = items[index];
+    fragment.appendChild(createAttachmentListCard(item));
+    if (Number.isInteger(selectedId) && item.id === selectedId) {
+      appendedSelected = true;
+    }
+  }
+
+  dom.attachmentsList.insertBefore(fragment, dom.attachmentsList.firstChild);
+  state.attachmentsRenderStartIndex = nextStart;
+  state.attachmentsListStartIndex = nextStart;
+
+  const heightDelta = dom.attachmentsList.scrollHeight - previousHeight;
+  dom.attachmentsList.scrollTop = previousTop + Math.max(0, heightDelta);
+  state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+
+  if (appendedSelected) {
+    syncAttachmentSelectionUi();
+  }
+
+  if (token !== state.attachmentsRenderToken) {
+    return;
+  }
+
+  revealPendingAttachmentIfNeeded();
+}
+
 function scrollAttachmentsListToTop() {
   if (!dom.attachmentsList || !state.attachmentsOpen) {
     return;
   }
 
+  state.attachmentsPendingRevealId = null;
   state.attachmentsListStartIndex = 0;
   state.attachmentsListScrollTop = 0;
   renderAttachmentList({ restoreScroll: false, startIndex: 0 });
@@ -1850,6 +1916,7 @@ function scrollAttachmentsListToBottom() {
   }
 
   const startIndex = Math.max(0, total - ATTACHMENTS_END_TELEPORT_WINDOW);
+  state.attachmentsPendingRevealId = null;
   state.selectedAttachmentId = items[total - 1]?.id ?? state.selectedAttachmentId;
   state.attachmentsListStartIndex = startIndex;
   state.attachmentsListScrollTop = 0;
@@ -1862,6 +1929,28 @@ function scrollAttachmentsListToBottom() {
     dom.attachmentsList.scrollTop = dom.attachmentsList.scrollHeight;
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
   });
+}
+
+function revealPendingAttachmentIfNeeded() {
+  if (!dom.attachmentsList) {
+    return;
+  }
+
+  const targetId = Number(state.attachmentsPendingRevealId);
+  if (!Number.isInteger(targetId)) {
+    return;
+  }
+
+  const targetCard = dom.attachmentsList.querySelector(
+    `.attachments-item[data-attachment-id="${targetId}"]`,
+  );
+  if (!(targetCard instanceof HTMLElement)) {
+    return;
+  }
+
+  targetCard.scrollIntoView({ block: "center", inline: "nearest" });
+  state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+  state.attachmentsPendingRevealId = null;
 }
 
 function appendAttachmentCardsBatch({ initial = false } = {}) {
@@ -1900,6 +1989,8 @@ function appendAttachmentCardsBatch({ initial = false } = {}) {
   if (appendedSelected || limit >= total) {
     syncAttachmentSelectionUi();
   }
+
+  revealPendingAttachmentIfNeeded();
 
   if (restoreAttachmentListScrollIfNeeded(token)) {
     return;
