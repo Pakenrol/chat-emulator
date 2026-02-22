@@ -541,10 +541,8 @@ button:disabled {
   border-radius: 12px;
   padding: 0.5rem;
   background: #fffaf2;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  grid-auto-flow: row;
-  grid-auto-rows: minmax(0, auto);
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.55rem;
   align-items: start;
   align-content: start;
@@ -560,10 +558,13 @@ button:disabled {
 
 .attachments-list-empty {
   padding: 0.6rem;
-  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .attachments-item {
+  flex: 1 1 170px;
+  min-width: 170px;
+  max-width: 280px;
   border: 1px solid #d9c7b1;
   border-radius: 10px;
   padding: 0.34rem;
@@ -1032,7 +1033,13 @@ button:disabled {
   }
 
   .attachments-list {
-    grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+    gap: 0.48rem;
+  }
+
+  .attachments-item {
+    flex-basis: 136px;
+    min-width: 136px;
+    max-width: none;
   }
 
   .attachments-preview-stage {
