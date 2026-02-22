@@ -3,6 +3,7 @@ const OVERSCAN = 12;
 const SEARCH_DEBOUNCE_MS = 160;
 const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 const JUMP_FOCUS_TIMEOUT_MS = 1900;
+const ATTACHMENTS_RENDER_CHUNK_SIZE = 140;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -42,6 +43,7 @@ const dom = {
   attachmentsPanel: document.querySelector("#attachmentsPanel"),
   closeAttachmentsBtn: document.querySelector("#closeAttachmentsBtn"),
   attachmentsCount: document.querySelector("#attachmentsCount"),
+  attachmentsMediaOnlyToggle: document.querySelector("#attachmentsMediaOnlyToggle"),
   attachmentsList: document.querySelector("#attachmentsList"),
   attachmentsPreview: document.querySelector("#attachmentsPreview"),
   mediaViewer: document.querySelector("#mediaViewer"),
@@ -81,7 +83,10 @@ const state = {
   assetFiles: null,
   assetUrlCache: null,
   attachmentsIndex: [],
+  attachmentsViewIndex: [],
   attachmentsById: new Map(),
+  attachmentsMediaOnly: false,
+  attachmentsRenderToken: 0,
   selectedAttachmentId: null,
   attachmentsOpen: false,
   jumpFocusIndex: -1,
@@ -261,6 +266,7 @@ function attachEvents() {
 
   dom.attachmentsList?.addEventListener("click", handleAttachmentListClick);
   dom.attachmentsPreview?.addEventListener("click", handleAttachmentPreviewClick);
+  dom.attachmentsMediaOnlyToggle?.addEventListener("change", handleAttachmentsMediaOnlyToggle);
   dom.chatCanvas.addEventListener("click", handleChatMediaClick);
 
   dom.mediaViewer?.addEventListener("click", (event) => {
@@ -507,8 +513,14 @@ function hydrateConversation(payload) {
 
   const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
   state.attachmentsIndex = attachmentItems;
+  state.attachmentsViewIndex = attachmentItems;
   state.attachmentsById = attachmentsById;
+  state.attachmentsMediaOnly = false;
+  state.attachmentsRenderToken = 0;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
+  if (dom.attachmentsMediaOnlyToggle) {
+    dom.attachmentsMediaOnlyToggle.checked = false;
+  }
 
   if (!state.messages.length) {
     setStatus("Источник загружен, но сообщений не найдено.", 1);
@@ -610,7 +622,10 @@ function resetConversationState() {
   state.assetFiles = null;
   state.assetUrlCache = null;
   state.attachmentsIndex = [];
+  state.attachmentsViewIndex = [];
   state.attachmentsById = new Map();
+  state.attachmentsMediaOnly = false;
+  state.attachmentsRenderToken = 0;
   state.selectedAttachmentId = null;
   state.attachmentsOpen = false;
   state.jumpFocusIndex = -1;
@@ -631,6 +646,10 @@ function resetConversationState() {
 
   dom.scrollToTopBtn.disabled = true;
   dom.scrollToBottomBtn.disabled = true;
+  if (dom.attachmentsMediaOnlyToggle) {
+    dom.attachmentsMediaOnlyToggle.checked = false;
+    dom.attachmentsMediaOnlyToggle.disabled = true;
+  }
 
   closeAttachmentsPanel({ restoreFocus: false });
   closeMediaViewer({ restoreFocus: false });
@@ -1411,20 +1430,87 @@ function formatTimestamp(value) {
   return Number.isFinite(value) ? dateFormatter.format(value) : "без времени";
 }
 
+function isPrimaryMediaAttachment(type) {
+  const normalized = normalizeAttachmentType(type);
+  return normalized === "image" || normalized === "video";
+}
+
+function handleAttachmentsMediaOnlyToggle() {
+  state.attachmentsMediaOnly = Boolean(dom.attachmentsMediaOnlyToggle?.checked);
+  updateAttachmentsUi();
+}
+
+function rebuildAttachmentsViewIndex() {
+  if (!state.attachmentsMediaOnly) {
+    state.attachmentsViewIndex = state.attachmentsIndex;
+    return;
+  }
+
+  const filtered = [];
+  for (const item of state.attachmentsIndex) {
+    if (isPrimaryMediaAttachment(item.type)) {
+      filtered.push(item);
+    }
+  }
+  state.attachmentsViewIndex = filtered;
+}
+
+function getVisibleAttachments() {
+  return Array.isArray(state.attachmentsViewIndex) ? state.attachmentsViewIndex : [];
+}
+
+function ensureSelectedAttachmentVisible() {
+  const visibleItems = getVisibleAttachments();
+  if (!visibleItems.length) {
+    state.selectedAttachmentId = null;
+    return;
+  }
+
+  const selectedId = Number(state.selectedAttachmentId);
+  if (Number.isInteger(selectedId)) {
+    for (const item of visibleItems) {
+      if (item.id === selectedId) {
+        return;
+      }
+    }
+  }
+
+  state.selectedAttachmentId = visibleItems[0]?.id ?? null;
+}
+
 function updateAttachmentsUi() {
-  const count = state.attachmentsIndex.length;
+  const totalCount = state.attachmentsIndex.length;
+  rebuildAttachmentsViewIndex();
+  const visibleCount = getVisibleAttachments().length;
+
+  if (dom.attachmentsMediaOnlyToggle) {
+    dom.attachmentsMediaOnlyToggle.checked = state.attachmentsMediaOnly;
+    dom.attachmentsMediaOnlyToggle.disabled = totalCount === 0;
+  }
 
   if (dom.openAttachmentsBtn) {
-    dom.openAttachmentsBtn.disabled = count === 0;
-    dom.openAttachmentsBtn.textContent =
-      count > 0 ? `Вложения (${count.toLocaleString("ru-RU")})` : "Вложения";
+    dom.openAttachmentsBtn.disabled = totalCount === 0;
+    if (totalCount > 0 && state.attachmentsMediaOnly) {
+      dom.openAttachmentsBtn.textContent =
+        `Вложения (${visibleCount.toLocaleString("ru-RU")}/${totalCount.toLocaleString("ru-RU")})`;
+    } else {
+      dom.openAttachmentsBtn.textContent =
+        totalCount > 0 ? `Вложения (${totalCount.toLocaleString("ru-RU")})` : "Вложения";
+    }
   }
 
   if (dom.attachmentsCount) {
-    dom.attachmentsCount.textContent = `${count.toLocaleString("ru-RU")} вложений`;
+    if (totalCount === 0) {
+      dom.attachmentsCount.textContent = "0 вложений";
+    } else if (state.attachmentsMediaOnly) {
+      dom.attachmentsCount.textContent =
+        `${visibleCount.toLocaleString("ru-RU")} из ${totalCount.toLocaleString("ru-RU")} вложений`;
+    } else {
+      dom.attachmentsCount.textContent = `${totalCount.toLocaleString("ru-RU")} вложений`;
+    }
   }
 
-  if (!count) {
+  if (!totalCount) {
     state.selectedAttachmentId = null;
     renderAttachmentList();
     renderAttachmentPreview();
@@ -1436,9 +1522,7 @@ function updateAttachmentsUi() {
     return;
   }
 
-  if (!findAttachmentItemById(state.selectedAttachmentId)) {
-    state.selectedAttachmentId = state.attachmentsIndex[0]?.id ?? null;
-  }
+  ensureSelectedAttachmentVisible();
 
   if (state.attachmentsOpen) {
     renderAttachmentsPanel();
@@ -1456,9 +1540,7 @@ function openAttachmentsPanel() {
   dom.attachmentsPanel.setAttribute("aria-hidden", "false");
   document.body.classList.add("attachments-open");
 
-  if (!findAttachmentItemById(state.selectedAttachmentId)) {
-    state.selectedAttachmentId = state.attachmentsIndex[0]?.id ?? null;
-  }
+  ensureSelectedAttachmentVisible();
 
   renderAttachmentsPanel();
 }
@@ -1468,6 +1550,7 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
     return;
   }
 
+  state.attachmentsRenderToken += 1;
   state.attachmentsOpen = false;
   dom.attachmentsPanel.hidden = true;
   dom.attachmentsPanel.setAttribute("aria-hidden", "true");
@@ -1479,6 +1562,7 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
 }
 
 function renderAttachmentsPanel() {
+  ensureSelectedAttachmentVisible();
   renderAttachmentList();
   renderAttachmentPreview();
 }
@@ -1488,55 +1572,99 @@ function renderAttachmentList() {
     return;
   }
 
-  if (!state.attachmentsIndex.length) {
+  const items = getVisibleAttachments();
+  state.attachmentsRenderToken += 1;
+  const renderToken = state.attachmentsRenderToken;
+  dom.attachmentsList.replaceChildren();
+
+  if (!items.length) {
     const empty = document.createElement("p");
     empty.className = "attachments-list-empty";
-    empty.textContent = "Во вложениях этого диалога ничего не найдено.";
-    dom.attachmentsList.replaceChildren(empty);
+    empty.textContent =
+      state.attachmentsIndex.length && state.attachmentsMediaOnly
+        ? "По фильтру «Исключить лишнее» нет фото и видео."
+        : "Во вложениях этого диалога ничего не найдено.";
+    dom.attachmentsList.appendChild(empty);
     return;
   }
 
-  const fragment = document.createDocumentFragment();
+  let cursor = 0;
+  const renderChunk = () => {
+    if (!dom.attachmentsList || renderToken !== state.attachmentsRenderToken) {
+      return;
+    }
 
-  for (const item of state.attachmentsIndex) {
-    const card = document.createElement("article");
-    card.className = "attachments-item";
-    card.dataset.attachmentId = String(item.id);
+    const fragment = document.createDocumentFragment();
+    const limit = Math.min(items.length, cursor + ATTACHMENTS_RENDER_CHUNK_SIZE);
 
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "attachments-item-open";
-    openButton.dataset.action = "preview";
-    openButton.dataset.attachmentId = String(item.id);
+    for (; cursor < limit; cursor += 1) {
+      fragment.appendChild(createAttachmentListCard(items[cursor]));
+    }
 
-    const thumb = createAttachmentListThumb(item);
-    const main = document.createElement("span");
-    main.className = "attachments-item-main";
+    dom.attachmentsList.appendChild(fragment);
+    syncAttachmentSelectionUi();
 
-    const title = document.createElement("span");
-    title.className = "attachments-item-title";
-    title.textContent = item.title || getAttachmentTypeLabel(item.type);
+    if (cursor < items.length) {
+      requestAnimationFrame(renderChunk);
+    }
+  };
 
-    const meta = document.createElement("span");
-    meta.className = "attachments-item-meta";
-    meta.textContent = `${item.sender} · ${formatTimestamp(item.timestamp)}`;
+  renderChunk();
+}
 
-    main.append(title, meta);
-    openButton.append(thumb, main);
+function createAttachmentListCard(item) {
+  const card = document.createElement("article");
+  card.className = "attachments-item";
+  card.dataset.attachmentId = String(item.id);
 
-    const jumpButton = document.createElement("button");
-    jumpButton.type = "button";
-    jumpButton.className = "attachments-item-jump";
-    jumpButton.textContent = "К сообщению";
-    jumpButton.dataset.action = "jump";
-    jumpButton.dataset.attachmentId = String(item.id);
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.className = "attachments-item-open";
+  openButton.dataset.action = "preview";
+  openButton.dataset.attachmentId = String(item.id);
 
-    card.append(openButton, jumpButton);
-    fragment.appendChild(card);
+  const thumb = createAttachmentListThumb(item);
+  const main = document.createElement("span");
+  main.className = "attachments-item-main";
+
+  const typeBadge = document.createElement("span");
+  typeBadge.className = "attachments-item-type";
+  typeBadge.textContent = getAttachmentTypeLabel(item.type);
+
+  const title = document.createElement("span");
+  title.className = "attachments-item-title";
+  title.textContent = item.title || getAttachmentTypeLabel(item.type);
+
+  main.append(typeBadge, title);
+  openButton.append(thumb, main);
+
+  const meta = document.createElement("p");
+  meta.className = "attachments-item-meta";
+  meta.textContent = `${item.sender} · ${formatTimestamp(item.timestamp)}`;
+
+  const actions = document.createElement("div");
+  actions.className = "attachments-item-actions";
+
+  if (isPrimaryMediaAttachment(item.type)) {
+    const openMediaButton = document.createElement("button");
+    openMediaButton.type = "button";
+    openMediaButton.className = "attachments-item-action";
+    openMediaButton.textContent = "Открыть";
+    openMediaButton.dataset.action = "open-media";
+    openMediaButton.dataset.attachmentId = String(item.id);
+    actions.appendChild(openMediaButton);
   }
 
-  dom.attachmentsList.replaceChildren(fragment);
-  syncAttachmentSelectionUi();
+  const jumpButton = document.createElement("button");
+  jumpButton.type = "button";
+  jumpButton.className = "attachments-item-action";
+  jumpButton.textContent = "К сообщению";
+  jumpButton.dataset.action = "jump";
+  jumpButton.dataset.attachmentId = String(item.id);
+  actions.appendChild(jumpButton);
+
+  card.append(openButton, meta, actions);
+  return card;
 }
 
 function syncAttachmentSelectionUi() {
@@ -1544,16 +1672,31 @@ function syncAttachmentSelectionUi() {
     return;
   }
 
-  const selectedId = Number(state.selectedAttachmentId);
-  for (const node of dom.attachmentsList.querySelectorAll(".attachments-item")) {
-    const itemId = Number(node.dataset.attachmentId);
-    const isActive = Number.isInteger(itemId) && itemId === selectedId;
-    node.classList.toggle("active", isActive);
-
-    const openButton = node.querySelector(".attachments-item-open");
-    if (openButton instanceof HTMLButtonElement) {
-      openButton.setAttribute("aria-pressed", String(isActive));
+  const activeNode = dom.attachmentsList.querySelector(".attachments-item.active");
+  if (activeNode instanceof HTMLElement) {
+    activeNode.classList.remove("active");
+    const button = activeNode.querySelector(".attachments-item-open");
+    if (button instanceof HTMLButtonElement) {
+      button.setAttribute("aria-pressed", "false");
     }
+  }
+
+  const selectedId = Number(state.selectedAttachmentId);
+  if (!Number.isInteger(selectedId)) {
+    return;
+  }
+
+  const nextActive = dom.attachmentsList.querySelector(
+    `.attachments-item[data-attachment-id="${selectedId}"]`,
+  );
+  if (!(nextActive instanceof HTMLElement)) {
+    return;
+  }
+
+  nextActive.classList.add("active");
+  const openButton = nextActive.querySelector(".attachments-item-open");
+  if (openButton instanceof HTMLButtonElement) {
+    openButton.setAttribute("aria-pressed", "true");
   }
 }
 
@@ -1573,11 +1716,41 @@ function createAttachmentListThumb(item) {
     img.alt = item.title || getAttachmentTypeLabel(item.type);
     img.src = imagePreviewUrl;
     slot.appendChild(img);
-    return slot;
+  } else {
+    const badge = document.createElement("span");
+    badge.className = "attachments-item-thumb-badge";
+    badge.textContent = ATTACHMENT_TYPE_BADGES[item.type] || "FILE";
+    slot.appendChild(badge);
   }
 
-  slot.textContent = ATTACHMENT_TYPE_BADGES[item.type] || "FILE";
+  if (item.type === "video") {
+    const videoBadge = document.createElement("span");
+    videoBadge.className = "attachments-item-thumb-video";
+    videoBadge.textContent = "VIDEO";
+    slot.appendChild(videoBadge);
+  }
+
   return slot;
+}
+
+function openAttachmentInViewer(attachmentId) {
+  const item = findAttachmentItemById(attachmentId);
+  if (!item || !isPrimaryMediaAttachment(item.type)) {
+    return;
+  }
+
+  const mediaUrl = resolveMediaUrl(item.url || item.thumbUrl);
+  if (!mediaUrl) {
+    return;
+  }
+
+  const posterUrl = resolveMediaUrl(item.thumbUrl || "");
+  openMediaViewer({
+    type: item.type,
+    url: mediaUrl,
+    poster: posterUrl,
+    title: item.title || getAttachmentTypeLabel(item.type),
+  });
 }
 
 function renderAttachmentPreview() {
@@ -1591,9 +1764,12 @@ function renderAttachmentPreview() {
   if (!item) {
     const empty = document.createElement("p");
     empty.className = "attachments-preview-empty";
-    empty.textContent = state.attachmentsIndex.length
-      ? "Выберите вложение слева, чтобы посмотреть его."
-      : "Вложения отсутствуют.";
+    empty.textContent =
+      state.attachmentsIndex.length && state.attachmentsMediaOnly
+        ? "По фильтру «Исключить лишнее» сейчас нет вложений для просмотра."
+        : state.attachmentsIndex.length
+          ? "Выберите вложение в сетке, чтобы посмотреть его."
+          : "Вложения отсутствуют.";
     dom.attachmentsPreview.appendChild(empty);
     return;
   }
@@ -1769,6 +1945,21 @@ function setSelectedAttachment(id) {
     return false;
   }
 
+  const visibleItems = getVisibleAttachments();
+  if (visibleItems.length) {
+    let isVisible = false;
+    for (const visibleItem of visibleItems) {
+      if (visibleItem.id === item.id) {
+        isVisible = true;
+        break;
+      }
+    }
+
+    if (!isVisible) {
+      return false;
+    }
+  }
+
   state.selectedAttachmentId = item.id;
   syncAttachmentSelectionUi();
   renderAttachmentPreview();
@@ -1794,6 +1985,12 @@ function handleAttachmentListClick(event) {
   const action = String(actionTarget.dataset.action || "");
   if (action === "preview") {
     setSelectedAttachment(attachmentId);
+    return;
+  }
+
+  if (action === "open-media") {
+    setSelectedAttachment(attachmentId);
+    openAttachmentInViewer(attachmentId);
     return;
   }
 
