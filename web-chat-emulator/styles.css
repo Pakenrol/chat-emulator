@@ -17,6 +17,11 @@
   font-family: Manrope, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
 }
 
+/* Preserve HTML hidden attribute semantics for overlays and popups. */
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
 }
