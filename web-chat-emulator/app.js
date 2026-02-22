@@ -3,9 +3,9 @@ const OVERSCAN = 12;
 const SEARCH_DEBOUNCE_MS = 160;
 const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 const JUMP_FOCUS_TIMEOUT_MS = 1900;
-const ATTACHMENTS_RENDER_CHUNK_SIZE = 72;
-const ATTACHMENTS_INITIAL_BATCH_SIZE = 180;
-const ATTACHMENTS_LOAD_AHEAD_PX = 680;
+const ATTACHMENTS_RENDER_CHUNK_SIZE = 40;
+const ATTACHMENTS_INITIAL_BATCH_SIZE = 60;
+const ATTACHMENTS_LOAD_AHEAD_PX = 500;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -50,6 +50,8 @@ const dom = {
   attachmentsPreview: document.querySelector("#attachmentsPreview"),
   mediaViewer: document.querySelector("#mediaViewer"),
   closeMediaViewerBtn: document.querySelector("#closeMediaViewerBtn"),
+  mediaViewerPrevBtn: document.querySelector("#mediaViewerPrevBtn"),
+  mediaViewerNextBtn: document.querySelector("#mediaViewerNextBtn"),
   mediaViewerLabel: document.querySelector("#mediaViewerLabel"),
   mediaViewerOpenOriginal: document.querySelector("#mediaViewerOpenOriginal"),
   mediaViewerStage: document.querySelector("#mediaViewerStage"),
@@ -89,7 +91,6 @@ const state = {
   attachmentsById: new Map(),
   attachmentsMediaOnly: false,
   attachmentsRenderToken: 0,
-  attachmentsThumbObserver: null,
   attachmentsRenderItems: [],
   attachmentsRenderedCount: 0,
   attachmentsRenderQueued: false,
@@ -102,6 +103,9 @@ const state = {
   mediaViewerUrl: "",
   mediaViewerPoster: "",
   mediaViewerTitle: "",
+  mediaViewerAttachmentId: null,
+  mediaAttachments: [],
+  mediaAttachmentPosById: new Map(),
 };
 
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
@@ -287,6 +291,12 @@ function attachEvents() {
       closeMediaViewer();
     }
   });
+  dom.mediaViewerPrevBtn?.addEventListener("click", () => {
+    stepMediaViewer(-1);
+  });
+  dom.mediaViewerNextBtn?.addEventListener("click", () => {
+    stepMediaViewer(1);
+  });
   dom.closeMediaViewerBtn?.addEventListener("click", () => {
     closeMediaViewer();
   });
@@ -344,6 +354,18 @@ function attachEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
+    if (state.mediaViewerOpen && event.key === "ArrowLeft") {
+      event.preventDefault();
+      stepMediaViewer(-1);
+      return;
+    }
+
+    if (state.mediaViewerOpen && event.key === "ArrowRight") {
+      event.preventDefault();
+      stepMediaViewer(1);
+      return;
+    }
+
     if (event.key !== "Escape") {
       return;
     }
@@ -525,12 +547,17 @@ function hydrateConversation(payload) {
   state.jumpFocusIndex = -1;
 
   const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
+  const { items: mediaItems, positionById: mediaPositionById } =
+    buildMediaAttachmentsIndex(attachmentItems);
   state.attachmentsIndex = attachmentItems;
   state.attachmentsViewIndex = attachmentItems;
   state.attachmentsById = attachmentsById;
+  state.mediaAttachments = mediaItems;
+  state.mediaAttachmentPosById = mediaPositionById;
   state.attachmentsMediaOnly = false;
   state.attachmentsRenderToken = 0;
   state.selectedAttachmentId = attachmentItems[0]?.id ?? null;
+  state.mediaViewerAttachmentId = null;
   if (dom.attachmentsMediaOnlyToggle) {
     dom.attachmentsMediaOnlyToggle.checked = false;
   }
@@ -639,7 +666,6 @@ function resetConversationState() {
   state.attachmentsById = new Map();
   state.attachmentsMediaOnly = false;
   state.attachmentsRenderToken = 0;
-  resetAttachmentsThumbObserver();
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
@@ -651,6 +677,9 @@ function resetConversationState() {
   state.mediaViewerUrl = "";
   state.mediaViewerPoster = "";
   state.mediaViewerTitle = "";
+  state.mediaViewerAttachmentId = null;
+  state.mediaAttachments = [];
+  state.mediaAttachmentPosById = new Map();
 
   dom.chatCanvas.replaceChildren();
   dom.searchInput.disabled = true;
@@ -1414,6 +1443,14 @@ function buildAttachmentsIndex(messages) {
         timestamp: message?.timestamp ?? null,
       };
 
+      if (attachment && typeof attachment === "object") {
+        try {
+          attachment.__attachmentId = nextId;
+        } catch {
+          // Ignore immutable objects; viewer navigation will fallback to URL matching.
+        }
+      }
+
       items.push(item);
       byId.set(nextId, item);
       nextId += 1;
@@ -1421,6 +1458,26 @@ function buildAttachmentsIndex(messages) {
   }
 
   return { items, byId };
+}
+
+function buildMediaAttachmentsIndex(items) {
+  const mediaItems = [];
+  const positionById = new Map();
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (!isPrimaryMediaAttachment(item?.type)) {
+      continue;
+    }
+
+    positionById.set(item.id, mediaItems.length);
+    mediaItems.push(item);
+  }
+
+  return {
+    items: mediaItems,
+    positionById,
+  };
 }
 
 function normalizeAttachmentType(type) {
@@ -1445,80 +1502,6 @@ function getAttachmentTypeLabel(type) {
 
 function formatTimestamp(value) {
   return Number.isFinite(value) ? dateFormatter.format(value) : "без времени";
-}
-
-function resetAttachmentsThumbObserver() {
-  if (state.attachmentsThumbObserver) {
-    state.attachmentsThumbObserver.disconnect();
-    state.attachmentsThumbObserver = null;
-  }
-}
-
-function loadAttachmentThumb(img) {
-  if (!(img instanceof HTMLImageElement)) {
-    return;
-  }
-
-  if (img.dataset.thumbLoaded === "true") {
-    return;
-  }
-
-  const rawThumb = String(img.dataset.thumbRaw || "").trim();
-  const rawFallback = String(img.dataset.urlRaw || "").trim();
-  const resolved = resolveMediaUrl(rawThumb || rawFallback);
-  if (!resolved) {
-    return;
-  }
-
-  img.src = resolved;
-  img.dataset.thumbLoaded = "true";
-}
-
-function getAttachmentsThumbObserver() {
-  if (state.attachmentsThumbObserver) {
-    return state.attachmentsThumbObserver;
-  }
-
-  if (typeof IntersectionObserver === "undefined") {
-    return null;
-  }
-
-  state.attachmentsThumbObserver = new IntersectionObserver(
-    (entries, observer) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) {
-          continue;
-        }
-
-        const target = entry.target;
-        if (target instanceof HTMLImageElement) {
-          loadAttachmentThumb(target);
-        }
-        observer.unobserve(target);
-      }
-    },
-    {
-      root: dom.attachmentsList,
-      rootMargin: "280px 0px",
-      threshold: 0.01,
-    },
-  );
-
-  return state.attachmentsThumbObserver;
-}
-
-function queueAttachmentThumbLoad(img) {
-  if (!(img instanceof HTMLImageElement)) {
-    return;
-  }
-
-  const observer = getAttachmentsThumbObserver();
-  if (!observer) {
-    loadAttachmentThumb(img);
-    return;
-  }
-
-  observer.observe(img);
 }
 
 function isPrimaryMediaAttachment(type) {
@@ -1641,7 +1624,6 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
     return;
   }
 
-  resetAttachmentsThumbObserver();
   state.attachmentsRenderToken += 1;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
@@ -1667,7 +1649,6 @@ function renderAttachmentList() {
     return;
   }
 
-  resetAttachmentsThumbObserver();
   const items = getVisibleAttachments();
   state.attachmentsRenderToken += 1;
   state.attachmentsRenderItems = items;
@@ -1847,14 +1828,20 @@ function createAttachmentListThumb(item) {
   slot.className = "attachments-item-thumb";
 
   if (item.type === "image" || item.type === "video") {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.alt = item.title || getAttachmentTypeLabel(item.type);
-    img.dataset.thumbRaw = String(item.thumbUrl || "");
-    img.dataset.urlRaw = String(item.url || "");
-    slot.appendChild(img);
-    queueAttachmentThumbLoad(img);
+    const previewUrl = resolveMediaUrl(item.thumbUrl || item.url);
+    if (!previewUrl) {
+      const badge = document.createElement("span");
+      badge.className = "attachments-item-thumb-badge";
+      badge.textContent = ATTACHMENT_TYPE_BADGES[item.type] || "FILE";
+      slot.appendChild(badge);
+    } else {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = item.title || getAttachmentTypeLabel(item.type);
+      img.src = previewUrl;
+      slot.appendChild(img);
+    }
   } else {
     const badge = document.createElement("span");
     badge.className = "attachments-item-thumb-badge";
@@ -1889,6 +1876,7 @@ function openAttachmentInViewer(attachmentId) {
     url: mediaUrl,
     poster: posterUrl,
     title: item.title || getAttachmentTypeLabel(item.type),
+    attachmentId: item.id,
   });
 }
 
@@ -2184,6 +2172,99 @@ function jumpToAttachmentMessage(attachmentId) {
   }, JUMP_FOCUS_TIMEOUT_MS);
 }
 
+function findMediaAttachmentByResolvedUrl(type, resolvedUrl) {
+  if (!resolvedUrl || !Array.isArray(state.mediaAttachments) || !state.mediaAttachments.length) {
+    return null;
+  }
+
+  const targetType = detectPreviewType(type, resolvedUrl);
+  if (!isPrimaryMediaAttachment(targetType)) {
+    return null;
+  }
+
+  for (const item of state.mediaAttachments) {
+    const itemType = detectPreviewType(item.type, item.url || item.thumbUrl);
+    if (itemType !== targetType) {
+      continue;
+    }
+
+    const primaryUrl = resolveMediaUrl(item.url);
+    if (primaryUrl && primaryUrl === resolvedUrl) {
+      return item;
+    }
+
+    const fallbackUrl = resolveMediaUrl(item.thumbUrl || "");
+    if (fallbackUrl && fallbackUrl === resolvedUrl) {
+      return item;
+    }
+  }
+
+  return null;
+}
+
+function updateMediaViewerNavButtons() {
+  const prevBtn = dom.mediaViewerPrevBtn;
+  const nextBtn = dom.mediaViewerNextBtn;
+  if (!prevBtn || !nextBtn) {
+    return;
+  }
+
+  const currentId = Number(state.mediaViewerAttachmentId);
+  const positionMap = state.mediaAttachmentPosById;
+  const mediaItems = Array.isArray(state.mediaAttachments) ? state.mediaAttachments : [];
+
+  if (!Number.isInteger(currentId) || !(positionMap instanceof Map) || !mediaItems.length) {
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
+    return;
+  }
+
+  const position = positionMap.get(currentId);
+  if (!Number.isInteger(position)) {
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
+    return;
+  }
+
+  prevBtn.disabled = position <= 0;
+  nextBtn.disabled = position >= mediaItems.length - 1;
+}
+
+function stepMediaViewer(direction) {
+  if (!state.mediaViewerOpen) {
+    return;
+  }
+
+  const directionSign = direction < 0 ? -1 : 1;
+  const currentId = Number(state.mediaViewerAttachmentId);
+  if (!Number.isInteger(currentId) || !(state.mediaAttachmentPosById instanceof Map)) {
+    return;
+  }
+
+  const currentPosition = state.mediaAttachmentPosById.get(currentId);
+  if (!Number.isInteger(currentPosition)) {
+    return;
+  }
+
+  const nextPosition = currentPosition + directionSign;
+  if (nextPosition < 0 || nextPosition >= state.mediaAttachments.length) {
+    return;
+  }
+
+  const item = state.mediaAttachments[nextPosition];
+  if (!item) {
+    return;
+  }
+
+  openMediaViewer({
+    type: item.type,
+    url: item.url || item.thumbUrl,
+    poster: item.thumbUrl || "",
+    title: item.title || getAttachmentTypeLabel(item.type),
+    attachmentId: item.id,
+  });
+}
+
 function handleChatMediaClick(event) {
   const target = event.target;
   if (!(target instanceof Element)) {
@@ -2201,6 +2282,8 @@ function handleChatMediaClick(event) {
   if (!mediaUrl) {
     return;
   }
+  const attachmentIdRaw = Number(mediaTarget.getAttribute("data-media-attachment-id"));
+  const attachmentId = Number.isInteger(attachmentIdRaw) ? attachmentIdRaw : null;
 
   event.preventDefault();
 
@@ -2209,10 +2292,11 @@ function handleChatMediaClick(event) {
     url: mediaUrl,
     poster: String(mediaTarget.getAttribute("data-media-poster") || ""),
     title: String(mediaTarget.getAttribute("data-media-title") || "").trim(),
+    attachmentId,
   });
 }
 
-function openMediaViewer({ type = "", url = "", poster = "", title = "" } = {}) {
+function openMediaViewer({ type = "", url = "", poster = "", title = "", attachmentId = null } = {}) {
   if (!dom.mediaViewer || !dom.mediaViewerStage) {
     return;
   }
@@ -2224,12 +2308,21 @@ function openMediaViewer({ type = "", url = "", poster = "", title = "" } = {}) 
 
   const resolvedPoster = poster ? resolveMediaUrl(poster) : "";
   const resolvedType = detectPreviewType(type, resolvedUrl);
+  let resolvedAttachmentId = Number(attachmentId);
+  if (!Number.isInteger(resolvedAttachmentId)) {
+    const matchedItem = findMediaAttachmentByResolvedUrl(resolvedType, resolvedUrl);
+    resolvedAttachmentId = matchedItem?.id ?? null;
+  }
+  if (!Number.isInteger(resolvedAttachmentId)) {
+    resolvedAttachmentId = null;
+  }
 
   state.mediaViewerOpen = true;
   state.mediaViewerType = resolvedType;
   state.mediaViewerUrl = resolvedUrl;
   state.mediaViewerPoster = resolvedPoster;
-  state.mediaViewerTitle = title || getAttachmentTypeLabel(type);
+  state.mediaViewerTitle = title || getAttachmentTypeLabel(resolvedType || type);
+  state.mediaViewerAttachmentId = resolvedAttachmentId;
 
   dom.mediaViewer.hidden = false;
   dom.mediaViewer.setAttribute("aria-hidden", "false");
@@ -2247,6 +2340,7 @@ function closeMediaViewer({ restoreFocus = false } = {}) {
   state.mediaViewerUrl = "";
   state.mediaViewerPoster = "";
   state.mediaViewerTitle = "";
+  state.mediaViewerAttachmentId = null;
 
   dom.mediaViewer.hidden = true;
   dom.mediaViewer.setAttribute("aria-hidden", "true");
@@ -2278,6 +2372,7 @@ function renderMediaViewerContent() {
     dom.mediaViewerOpenOriginal.hidden = true;
     dom.mediaViewerOpenOriginal.removeAttribute("href");
   }
+  updateMediaViewerNavButtons();
 
   const type = state.mediaViewerType;
   const src = state.mediaViewerUrl;
@@ -2605,6 +2700,8 @@ function renderAttachments(attachments) {
   for (const attachment of attachments) {
     const type = String(attachment?.type || "");
     const title = String(attachment?.title || "").trim();
+    const attachmentIdRaw = Number(attachment?.__attachmentId);
+    const attachmentId = Number.isInteger(attachmentIdRaw) ? attachmentIdRaw : null;
 
     if (type === "image") {
       const full = resolveMediaUrl(attachment.url);
@@ -2623,6 +2720,9 @@ function renderAttachments(attachments) {
       link.dataset.mediaUrl = full || thumb;
       link.dataset.mediaPoster = "";
       link.dataset.mediaTitle = title || "Изображение";
+      if (attachmentId !== null) {
+        link.dataset.mediaAttachmentId = String(attachmentId);
+      }
 
       const img = document.createElement("img");
       img.className = "attachment-image";
@@ -2671,6 +2771,9 @@ function renderAttachments(attachments) {
       openInlineButton.dataset.mediaUrl = src;
       openInlineButton.dataset.mediaPoster = poster || "";
       openInlineButton.dataset.mediaTitle = title || "Видео";
+      if (attachmentId !== null) {
+        openInlineButton.dataset.mediaAttachmentId = String(attachmentId);
+      }
       actions.appendChild(openInlineButton);
       wrap.appendChild(actions);
       continue;

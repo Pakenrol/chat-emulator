@@ -571,12 +571,10 @@ button:disabled {
   display: grid;
   grid-template-rows: auto auto auto;
   gap: 0.38rem;
-  min-height: 236px;
+  min-height: 0;
   align-content: start;
   overflow: hidden;
-  contain: layout paint style;
-  content-visibility: auto;
-  contain-intrinsic-size: 260px;
+  align-self: start;
 }
 
 .attachments-item.active {
