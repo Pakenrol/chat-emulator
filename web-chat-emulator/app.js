@@ -6,6 +6,7 @@ const JUMP_FOCUS_TIMEOUT_MS = 1900;
 const ATTACHMENTS_RENDER_CHUNK_SIZE = 40;
 const ATTACHMENTS_INITIAL_BATCH_SIZE = 60;
 const ATTACHMENTS_LOAD_AHEAD_PX = 500;
+const ATTACHMENTS_END_TELEPORT_WINDOW = 160;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -96,6 +97,8 @@ const state = {
   attachmentsRenderItems: [],
   attachmentsRenderedCount: 0,
   attachmentsRenderQueued: false,
+  attachmentsRenderStartIndex: 0,
+  attachmentsListStartIndex: 0,
   attachmentsListScrollTop: 0,
   attachmentsListRestoreTarget: 0,
   attachmentsListRestorePending: false,
@@ -575,6 +578,8 @@ function hydrateConversation(payload) {
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsRenderStartIndex = 0;
+  state.attachmentsListStartIndex = 0;
   state.attachmentsListScrollTop = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
@@ -691,6 +696,8 @@ function resetConversationState() {
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsRenderStartIndex = 0;
+  state.attachmentsListStartIndex = 0;
   state.attachmentsListScrollTop = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
@@ -1639,6 +1646,11 @@ function updateAttachmentsUi() {
   }
 
   if (!totalCount) {
+    state.attachmentsRenderStartIndex = 0;
+    state.attachmentsListStartIndex = 0;
+    state.attachmentsListScrollTop = 0;
+    state.attachmentsListRestoreTarget = 0;
+    state.attachmentsListRestorePending = false;
     state.selectedAttachmentId = null;
     renderAttachmentList();
 
@@ -1679,12 +1691,14 @@ function closeAttachmentsPanel({ restoreFocus = true } = {}) {
 
   if (state.attachmentsOpen && dom.attachmentsList) {
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+    state.attachmentsListStartIndex = state.attachmentsRenderStartIndex;
   }
 
   state.attachmentsRenderToken += 1;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
   state.attachmentsRenderQueued = false;
+  state.attachmentsRenderStartIndex = 0;
   state.attachmentsListRestoreTarget = 0;
   state.attachmentsListRestorePending = false;
   state.attachmentsOpen = false;
@@ -1701,20 +1715,30 @@ function renderAttachmentsPanel({ preserveScroll = true } = {}) {
   ensureSelectedAttachmentVisible();
   if (preserveScroll && dom.attachmentsList && !state.attachmentsListRestorePending) {
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
+    state.attachmentsListStartIndex = state.attachmentsRenderStartIndex;
   }
   renderAttachmentList({ restoreScroll: state.attachmentsOpen });
 }
 
-function renderAttachmentList({ restoreScroll = false } = {}) {
+function renderAttachmentList({ restoreScroll = false, startIndex = null } = {}) {
   if (!dom.attachmentsList) {
     return;
   }
 
   const items = getVisibleAttachments();
+  const total = items.length;
+  let normalizedStart = Number.isInteger(Number(startIndex)) ? Number(startIndex) : 0;
+  if (!Number.isInteger(Number(startIndex)) && restoreScroll) {
+    normalizedStart = Number(state.attachmentsListStartIndex) || 0;
+  }
+  normalizedStart = Math.max(0, Math.min(normalizedStart, Math.max(0, total - 1)));
+
   state.attachmentsRenderToken += 1;
   state.attachmentsRenderItems = items;
-  state.attachmentsRenderedCount = 0;
+  state.attachmentsRenderStartIndex = normalizedStart;
+  state.attachmentsRenderedCount = normalizedStart;
   state.attachmentsRenderQueued = false;
+  state.attachmentsListStartIndex = normalizedStart;
   state.attachmentsListRestorePending = Boolean(restoreScroll && state.attachmentsOpen);
   state.attachmentsListRestoreTarget = state.attachmentsListRestorePending
     ? Math.max(0, Number(state.attachmentsListScrollTop) || 0)
@@ -1723,6 +1747,8 @@ function renderAttachmentList({ restoreScroll = false } = {}) {
   dom.attachmentsList.scrollTop = 0;
 
   if (!items.length) {
+    state.attachmentsRenderStartIndex = 0;
+    state.attachmentsListStartIndex = 0;
     state.attachmentsListRestoreTarget = 0;
     state.attachmentsListRestorePending = false;
     const empty = document.createElement("p");
@@ -1758,6 +1784,9 @@ function scrollAttachmentsListToTop() {
     return;
   }
 
+  state.attachmentsListStartIndex = 0;
+  state.attachmentsListScrollTop = 0;
+  renderAttachmentList({ restoreScroll: false, startIndex: 0 });
   dom.attachmentsList.scrollTop = 0;
   state.attachmentsListScrollTop = 0;
 }
@@ -1767,26 +1796,25 @@ function scrollAttachmentsListToBottom() {
     return;
   }
 
-  const token = state.attachmentsRenderToken;
+  const items = getVisibleAttachments();
+  const total = items.length;
+  if (!total) {
+    return;
+  }
 
-  const step = () => {
-    if (!dom.attachmentsList || !state.attachmentsOpen || token !== state.attachmentsRenderToken) {
+  const startIndex = Math.max(0, total - ATTACHMENTS_END_TELEPORT_WINDOW);
+  state.selectedAttachmentId = items[total - 1]?.id ?? state.selectedAttachmentId;
+  state.attachmentsListStartIndex = startIndex;
+  state.attachmentsListScrollTop = 0;
+  renderAttachmentList({ restoreScroll: false, startIndex });
+
+  requestAnimationFrame(() => {
+    if (!dom.attachmentsList || !state.attachmentsOpen) {
       return;
     }
-
-    const total = Array.isArray(state.attachmentsRenderItems) ? state.attachmentsRenderItems.length : 0;
     dom.attachmentsList.scrollTop = dom.attachmentsList.scrollHeight;
     state.attachmentsListScrollTop = dom.attachmentsList.scrollTop;
-
-    if (state.attachmentsRenderedCount >= total) {
-      return;
-    }
-
-    appendAttachmentCardsBatch();
-    requestAnimationFrame(step);
-  };
-
-  step();
+  });
 }
 
 function appendAttachmentCardsBatch({ initial = false } = {}) {
@@ -1797,12 +1825,14 @@ function appendAttachmentCardsBatch({ initial = false } = {}) {
   const token = state.attachmentsRenderToken;
   const items = state.attachmentsRenderItems;
   const total = Array.isArray(items) ? items.length : 0;
-  const cursor = state.attachmentsRenderedCount;
+  const startIndex = Math.max(0, Number(state.attachmentsRenderStartIndex) || 0);
+  const cursor = Math.max(startIndex, state.attachmentsRenderedCount);
   if (!total || cursor >= total) {
     return;
   }
 
-  const batchSize = initial ? ATTACHMENTS_INITIAL_BATCH_SIZE : ATTACHMENTS_RENDER_CHUNK_SIZE;
+  const batchSize =
+    initial && startIndex > 0 ? ATTACHMENTS_END_TELEPORT_WINDOW : initial ? ATTACHMENTS_INITIAL_BATCH_SIZE : ATTACHMENTS_RENDER_CHUNK_SIZE;
   const limit = Math.min(total, cursor + batchSize);
   const selectedId = Number(state.selectedAttachmentId);
 
