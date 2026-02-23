@@ -182,7 +182,7 @@ button:disabled {
 
 .search-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 0.48rem;
 }
 
@@ -193,6 +193,11 @@ button:disabled {
   border-radius: 11px;
   background: #fff;
   min-width: 0;
+}
+
+.search-mode-toggle[aria-pressed="true"] {
+  background: #ffe9cc;
+  border-color: #e3c29d;
 }
 
 .search-suggestions {
@@ -833,7 +838,7 @@ button:disabled {
   }
 
   .search-row {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .search-row input {

@@ -33,6 +33,7 @@ const dom = {
   chatMeta: document.querySelector("#chatMeta"),
   searchSection: document.querySelector(".search"),
   searchInput: document.querySelector("#searchInput"),
+  searchModeToggle: document.querySelector("#searchModeToggle"),
   searchSuggestions: document.querySelector("#searchSuggestions"),
   searchSuggestionsCanvas: document.querySelector("#searchSuggestionsCanvas"),
   searchStatus: document.querySelector("#searchStatus"),
@@ -81,6 +82,8 @@ const state = {
   suggestionsForceNextRender: false,
   searchQuery: "",
   previousSearchQuery: "",
+  searchFuzzyMode: false,
+  previousSearchFuzzyMode: false,
   rowHeights: [],
   tree: null,
   renderedStart: -1,
@@ -271,6 +274,9 @@ function attachEvents() {
 
   dom.prevMatchBtn.addEventListener("click", () => moveMatchPointer(-1));
   dom.nextMatchBtn.addEventListener("click", () => moveMatchPointer(1));
+  dom.searchModeToggle?.addEventListener("click", () => {
+    setSearchMode(!state.searchFuzzyMode);
+  });
 
   dom.openAttachmentsBtn?.addEventListener("click", () => {
     openAttachmentsPanel();
@@ -426,6 +432,8 @@ function attachEvents() {
       beginLoad(file);
     }
   });
+
+  updateSearchModeToggleUi();
 }
 
 function beginLoad(file) {
@@ -566,6 +574,7 @@ function hydrateConversation(payload) {
   state.suggestionsForceNextRender = false;
   state.searchQuery = "";
   state.previousSearchQuery = "";
+  state.previousSearchFuzzyMode = state.searchFuzzyMode;
   state.jumpFocusIndex = -1;
 
   const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
@@ -639,6 +648,7 @@ function hydrateConversation(payload) {
   dom.searchStatus.textContent = "Введите текст для поиска";
   dom.prevMatchBtn.disabled = true;
   dom.nextMatchBtn.disabled = true;
+  updateSearchModeToggleUi();
   closeSearchSuggestions();
   updateAttachmentsUi();
 
@@ -685,6 +695,7 @@ function resetConversationState() {
   state.suggestionsForceNextRender = false;
   state.searchQuery = "";
   state.previousSearchQuery = "";
+  state.previousSearchFuzzyMode = state.searchFuzzyMode;
   state.rowHeights = [];
   state.tree = null;
   state.renderedStart = -1;
@@ -728,6 +739,7 @@ function resetConversationState() {
   dom.searchSuggestions.hidden = true;
   dom.searchSuggestionsCanvas.style.height = "0px";
   dom.searchSuggestionsCanvas.replaceChildren();
+  updateSearchModeToggleUi();
 
   dom.scrollToTopBtn.disabled = true;
   dom.scrollToBottomBtn.disabled = true;
@@ -909,6 +921,83 @@ function scheduleMeasurement() {
   });
 }
 
+function updateSearchModeToggleUi() {
+  if (!(dom.searchModeToggle instanceof HTMLButtonElement)) {
+    return;
+  }
+
+  dom.searchModeToggle.textContent = state.searchFuzzyMode ? "Fuzzy: вкл" : "Fuzzy: выкл";
+  dom.searchModeToggle.setAttribute("aria-pressed", state.searchFuzzyMode ? "true" : "false");
+  dom.searchModeToggle.disabled = !state.messages.length || dom.searchInput.disabled;
+}
+
+function setSearchMode(nextFuzzyMode) {
+  const enabled = Boolean(nextFuzzyMode);
+  if (state.searchFuzzyMode === enabled) {
+    return;
+  }
+
+  state.searchFuzzyMode = enabled;
+  state.previousSearchQuery = "";
+  state.previousSearchFuzzyMode = enabled;
+  updateSearchModeToggleUi();
+
+  if (!state.messages.length) {
+    return;
+  }
+
+  if (state.searchDebounceId) {
+    clearTimeout(state.searchDebounceId);
+    state.searchDebounceId = null;
+  }
+
+  runSearch(dom.searchInput.value);
+  openSearchSuggestions();
+}
+
+function scoreFuzzySubsequence(source, query) {
+  if (!query) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  if (query.length <= 1) {
+    return source.includes(query) ? 1 : Number.NEGATIVE_INFINITY;
+  }
+
+  let queryPos = 0;
+  let score = 0;
+  let streak = 0;
+  let firstMatch = -1;
+  let lastMatch = -1;
+
+  for (let index = 0; index < source.length && queryPos < query.length; index += 1) {
+    const char = source.charAt(index);
+    if (char === query.charAt(queryPos)) {
+      if (firstMatch < 0) {
+        firstMatch = index;
+      }
+      lastMatch = index;
+      queryPos += 1;
+      streak += 1;
+      score += 10 + Math.min(streak, 6) * 2;
+      if (index === 0 || /[^a-z0-9а-яё]/i.test(source.charAt(index - 1))) {
+        score += 4;
+      }
+    } else {
+      streak = 0;
+    }
+  }
+
+  if (queryPos !== query.length) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const span = Math.max(1, lastMatch - firstMatch + 1);
+  score += Math.max(0, 50 - span);
+  score -= Math.floor(Math.max(0, firstMatch) / 40);
+  return score;
+}
+
 function runSearch(rawQuery) {
   state.searchQuery = String(rawQuery || "").trim().toLowerCase();
 
@@ -917,27 +1006,46 @@ function runSearch(rawQuery) {
     state.activeSearchResult = -1;
     state.previewCursor = -1;
     state.previousSearchQuery = "";
+    state.previousSearchFuzzyMode = state.searchFuzzyMode;
     closeSearchSuggestions();
     updateSearchUi();
     renderVisibleMessages(true);
     return;
   }
 
+  const useFuzzy = state.searchFuzzyMode;
   const canReusePreviousPool =
-    state.previousSearchQuery && state.searchQuery.startsWith(state.previousSearchQuery);
+    state.previousSearchQuery &&
+    state.searchQuery.startsWith(state.previousSearchQuery) &&
+    state.previousSearchFuzzyMode === useFuzzy;
   const pool = canReusePreviousPool ? state.searchResults : state.allIndexes;
 
-  const nextResults = [];
-  for (const index of pool) {
-    if (state.searchCorpus[index].includes(state.searchQuery)) {
-      nextResults.push(index);
+  let nextResults = [];
+  if (useFuzzy) {
+    const ranked = [];
+    for (const index of pool) {
+      const score = scoreFuzzySubsequence(state.searchCorpus[index], state.searchQuery);
+      if (Number.isFinite(score)) {
+        ranked.push({ index, score });
+      }
     }
+    ranked.sort((left, right) => right.score - left.score || left.index - right.index);
+    nextResults = ranked.map((entry) => entry.index);
+  } else {
+    const exactMatches = [];
+    for (const index of pool) {
+      if (state.searchCorpus[index].includes(state.searchQuery)) {
+        exactMatches.push(index);
+      }
+    }
+    nextResults = exactMatches;
   }
 
   state.searchResults = nextResults;
   state.activeSearchResult = nextResults.length ? 0 : -1;
   state.previewCursor = state.activeSearchResult;
   state.previousSearchQuery = state.searchQuery;
+  state.previousSearchFuzzyMode = useFuzzy;
 
   if (!nextResults.length) {
     closeSearchSuggestions();
@@ -1334,6 +1442,8 @@ function truncateText(source, maxLength) {
 }
 
 function updateSearchUi() {
+  updateSearchModeToggleUi();
+
   if (!state.messages.length) {
     closeSearchSuggestions();
     dom.searchStatus.textContent = "Поиск недоступен";
