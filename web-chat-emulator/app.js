@@ -69,6 +69,7 @@ const state = {
   searchCorpus: [],
   allIndexes: [],
   searchResults: [],
+  searchResultIndexes: new Set(),
   activeSearchResult: -1,
   previewCursor: -1,
   highlightQuery: "",
@@ -563,6 +564,7 @@ function hydrateConversation(payload) {
   });
   state.allIndexes = Array.from({ length: state.messages.length }, (_, index) => index);
   state.searchResults = [];
+  state.searchResultIndexes = new Set();
   state.activeSearchResult = -1;
   state.previewCursor = -1;
   state.highlightQuery = "";
@@ -684,6 +686,7 @@ function resetConversationState() {
   state.searchCorpus = [];
   state.allIndexes = [];
   state.searchResults = [];
+  state.searchResultIndexes = new Set();
   state.activeSearchResult = -1;
   state.previewCursor = -1;
   state.highlightQuery = "";
@@ -1003,6 +1006,7 @@ function runSearch(rawQuery) {
 
   if (!state.searchQuery) {
     state.searchResults = [];
+    state.searchResultIndexes = new Set();
     state.activeSearchResult = -1;
     state.previewCursor = -1;
     state.previousSearchQuery = "";
@@ -1042,6 +1046,7 @@ function runSearch(rawQuery) {
   }
 
   state.searchResults = nextResults;
+  state.searchResultIndexes = new Set(nextResults);
   state.activeSearchResult = nextResults.length ? 0 : -1;
   state.previewCursor = state.activeSearchResult;
   state.previousSearchQuery = state.searchQuery;
@@ -1484,8 +1489,26 @@ function scrollToMessageIndex(index) {
   const top = state.tree.sum(index);
   const messageHeight = state.rowHeights[index] || ESTIMATED_ROW_HEIGHT;
   const offset = (viewportHeight - messageHeight) * 0.5;
+  const targetScrollTop = Math.max(0, top - offset);
 
-  setChatScrollTop(Math.max(0, top - offset));
+  syncChatCanvasHeight();
+  // Force layout so the browser clamps against the current virtual height.
+  void dom.chatViewport.scrollHeight;
+  setChatScrollTop(targetScrollTop);
+  renderVisibleMessages(true);
+  updateScrollNavButtons();
+
+  requestAnimationFrame(() => {
+    if (!state.tree || index < 0 || index >= state.messages.length) {
+      return;
+    }
+
+    syncChatCanvasHeight();
+    void dom.chatViewport.scrollHeight;
+    setChatScrollTop(targetScrollTop);
+    renderVisibleMessages(true);
+    updateScrollNavButtons();
+  });
 }
 
 function setChatScrollTop(value) {
@@ -2667,26 +2690,7 @@ function renderMediaViewerContent() {
 }
 
 function isIndexInSearchResults(index) {
-  const results = state.searchResults;
-  let left = 0;
-  let right = results.length - 1;
-
-  while (left <= right) {
-    const middle = Math.floor((left + right) / 2);
-    const value = results[middle];
-
-    if (value === index) {
-      return true;
-    }
-
-    if (value < index) {
-      left = middle + 1;
-    } else {
-      right = middle - 1;
-    }
-  }
-
-  return false;
+  return state.searchResultIndexes.has(index);
 }
 
 function getHighlightMatcher(query) {
