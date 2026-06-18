@@ -415,15 +415,24 @@ function attachEvents() {
     event.preventDefault();
   });
 
-  document.addEventListener("drop", (event) => {
+  document.addEventListener("drop", async (event) => {
     event.preventDefault();
-    const files = Array.from(event.dataTransfer?.files || []);
+    let files = [];
+
+    try {
+      files = await collectDroppedFiles(event.dataTransfer);
+    } catch (error) {
+      setStatus(`Ошибка чтения перетащенной папки: ${getErrorMessage(error)}`, 0);
+      return;
+    }
+
     if (!files.length) {
       return;
     }
 
     const htmlFiles = files.filter((file) => /\.html?$/i.test(file.name));
-    if (htmlFiles.length > 1) {
+    const hasDirectoryPaths = files.some((file) => getFileRelativePath(file).includes("/"));
+    if (hasDirectoryPaths || htmlFiles.length > 1) {
       beginLoadDirectory(files);
       return;
     }
@@ -2782,15 +2791,14 @@ function getErrorMessage(error) {
 }
 
 function inferDirectoryLabel(files) {
-  const first = files.find((file) => typeof file?.webkitRelativePath === "string");
-  const path = first?.webkitRelativePath || "";
+  const first = files.find((file) => getFileRelativePath(file));
+  const path = getFileRelativePath(first);
   const firstSegment = path.split("/")[0];
   return firstSegment || "папка";
 }
 
 function prepareDirectoryEntries(files) {
-  const firstPath = files.find((file) => typeof file?.webkitRelativePath === "string")
-    ?.webkitRelativePath;
+  const firstPath = getFileRelativePath(files.find((file) => getFileRelativePath(file)));
   const rootPrefix =
     typeof firstPath === "string" && firstPath.includes("/")
       ? `${firstPath.split("/")[0]}/`
@@ -2800,7 +2808,7 @@ function prepareDirectoryEntries(files) {
   const assetFiles = new Map();
 
   for (const file of files) {
-    let relativePath = file.webkitRelativePath || file.name;
+    let relativePath = getFileRelativePath(file) || file.name;
     if (rootPrefix && relativePath.startsWith(rootPrefix)) {
       relativePath = relativePath.slice(rootPrefix.length);
     }
@@ -2814,6 +2822,98 @@ function prepareDirectoryEntries(files) {
   }
 
   return { entries, assetFiles };
+}
+
+async function collectDroppedFiles(dataTransfer) {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const items = Array.from(dataTransfer.items || []);
+  const entries = items
+    .map((item) =>
+      typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null,
+    )
+    .filter(Boolean);
+
+  if (!entries.length) {
+    return Array.from(dataTransfer.files || []);
+  }
+
+  const nestedFiles = await Promise.all(entries.map((entry) => collectEntryFiles(entry)));
+  const files = nestedFiles.flat();
+  return files.length ? files : Array.from(dataTransfer.files || []);
+}
+
+async function collectEntryFiles(entry) {
+  if (!entry) {
+    return [];
+  }
+
+  if (entry.isFile) {
+    const file = await getFileFromEntry(entry);
+    setDroppedFileRelativePath(file, entry.fullPath || entry.name);
+    return [file];
+  }
+
+  if (!entry.isDirectory) {
+    return [];
+  }
+
+  const childEntries = await readDirectoryEntries(entry);
+  const nestedFiles = await Promise.all(childEntries.map((child) => collectEntryFiles(child)));
+  return nestedFiles.flat();
+}
+
+function getFileFromEntry(entry) {
+  return new Promise((resolve, reject) => {
+    entry.file(resolve, reject);
+  });
+}
+
+function readDirectoryEntries(directoryEntry) {
+  const reader = directoryEntry.createReader();
+  const entries = [];
+
+  return new Promise((resolve, reject) => {
+    const readNextBatch = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) {
+          resolve(entries);
+          return;
+        }
+
+        entries.push(...batch);
+        readNextBatch();
+      }, reject);
+    };
+
+    readNextBatch();
+  });
+}
+
+function setDroppedFileRelativePath(file, relativePath) {
+  const normalized = normalizeRelPath(relativePath);
+  if (!normalized) {
+    return;
+  }
+
+  try {
+    Object.defineProperty(file, "__chatEmulatorRelativePath", {
+      value: normalized,
+      configurable: true,
+    });
+  } catch {
+    file.__chatEmulatorRelativePath = normalized;
+  }
+}
+
+function getFileRelativePath(file) {
+  if (!file) {
+    return "";
+  }
+
+  return String(file.__chatEmulatorRelativePath || file.webkitRelativePath || "");
 }
 
 function normalizeRelPath(value) {
