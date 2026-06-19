@@ -50,6 +50,7 @@ const dom = {
   closeAttachmentsBtn: document.querySelector("#closeAttachmentsBtn"),
   attachmentsCount: document.querySelector("#attachmentsCount"),
   attachmentsMediaOnlyToggle: document.querySelector("#attachmentsMediaOnlyToggle"),
+  attachmentsTypeFilter: document.querySelector("#attachmentsTypeFilter"),
   attachmentsScrollTopBtn: document.querySelector("#attachmentsScrollTopBtn"),
   attachmentsScrollBottomBtn: document.querySelector("#attachmentsScrollBottomBtn"),
   attachmentsList: document.querySelector("#attachmentsList"),
@@ -100,6 +101,7 @@ const state = {
   attachmentsViewIndex: [],
   attachmentsById: new Map(),
   attachmentsMediaOnly: true,
+  attachmentsMediaTypeFilter: "media",
   attachmentsRenderToken: 0,
   attachmentsRenderItems: [],
   attachmentsRenderedCount: 0,
@@ -117,6 +119,7 @@ const state = {
   jumpFocusTimeoutId: null,
   mediaViewerOpen: false,
   mediaViewerType: "",
+  mediaViewerRawUrl: "",
   mediaViewerUrl: "",
   mediaViewerPoster: "",
   mediaViewerTitle: "",
@@ -306,6 +309,7 @@ function attachEvents() {
     { passive: true },
   );
   dom.attachmentsMediaOnlyToggle?.addEventListener("change", handleAttachmentsMediaOnlyToggle);
+  dom.attachmentsTypeFilter?.addEventListener("click", handleAttachmentsTypeFilterClick);
   dom.attachmentsScrollTopBtn?.addEventListener("click", () => {
     scrollAttachmentsListToTop();
   });
@@ -600,6 +604,7 @@ function hydrateConversation(payload) {
   state.mediaAttachments = mediaItems;
   state.mediaAttachmentPosById = mediaPositionById;
   state.attachmentsMediaOnly = true;
+  state.attachmentsMediaTypeFilter = "media";
   state.attachmentsRenderToken = 0;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
@@ -724,6 +729,7 @@ function resetConversationState() {
   state.attachmentsViewIndex = [];
   state.attachmentsById = new Map();
   state.attachmentsMediaOnly = true;
+  state.attachmentsMediaTypeFilter = "media";
   state.attachmentsRenderToken = 0;
   state.attachmentsRenderItems = [];
   state.attachmentsRenderedCount = 0;
@@ -740,6 +746,7 @@ function resetConversationState() {
   state.jumpFocusIndex = -1;
   state.mediaViewerOpen = false;
   state.mediaViewerType = "";
+  state.mediaViewerRawUrl = "";
   state.mediaViewerUrl = "";
   state.mediaViewerPoster = "";
   state.mediaViewerTitle = "";
@@ -763,6 +770,7 @@ function resetConversationState() {
     dom.attachmentsMediaOnlyToggle.checked = true;
     dom.attachmentsMediaOnlyToggle.disabled = true;
   }
+  updateAttachmentsTypeFilterUi();
   if (dom.attachmentsScrollTopBtn) {
     dom.attachmentsScrollTopBtn.disabled = true;
   }
@@ -1776,6 +1784,76 @@ function handleAttachmentsMediaOnlyToggle() {
   updateAttachmentsUi();
 }
 
+function normalizeAttachmentsMediaTypeFilter(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "image" || normalized === "video") {
+    return normalized;
+  }
+
+  return "media";
+}
+
+function getAttachmentsFilterLabel() {
+  if (!state.attachmentsMediaOnly) {
+    return "Все";
+  }
+
+  if (state.attachmentsMediaTypeFilter === "image") {
+    return "Фото";
+  }
+
+  if (state.attachmentsMediaTypeFilter === "video") {
+    return "Видео";
+  }
+
+  return "Медиа";
+}
+
+function handleAttachmentsTypeFilterClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+
+  const button = target.closest("[data-attachments-type-filter]");
+  if (!(button instanceof HTMLButtonElement) || button.disabled) {
+    return;
+  }
+
+  const nextFilter = normalizeAttachmentsMediaTypeFilter(
+    button.dataset.attachmentsTypeFilter,
+  );
+  if (state.attachmentsMediaTypeFilter === nextFilter) {
+    return;
+  }
+
+  state.attachmentsMediaTypeFilter = nextFilter;
+  updateAttachmentsUi();
+}
+
+function updateAttachmentsTypeFilterUi() {
+  const group = dom.attachmentsTypeFilter;
+  if (!(group instanceof HTMLElement)) {
+    return;
+  }
+
+  const activeFilter = normalizeAttachmentsMediaTypeFilter(
+    state.attachmentsMediaTypeFilter,
+  );
+  const disabled = !state.attachmentsIndex.length || !state.attachmentsMediaOnly;
+  const buttons = group.querySelectorAll("[data-attachments-type-filter]");
+  for (const button of buttons) {
+    if (!(button instanceof HTMLButtonElement)) {
+      continue;
+    }
+
+    const filter = normalizeAttachmentsMediaTypeFilter(button.dataset.attachmentsTypeFilter);
+    const isActive = filter === activeFilter;
+    button.disabled = disabled;
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  }
+}
+
 function rebuildAttachmentsViewIndex() {
   if (!state.attachmentsMediaOnly) {
     state.attachmentsViewIndex = state.attachmentsIndex;
@@ -1783,8 +1861,17 @@ function rebuildAttachmentsViewIndex() {
   }
 
   const filtered = [];
+  const mediaTypeFilter = normalizeAttachmentsMediaTypeFilter(state.attachmentsMediaTypeFilter);
   for (const item of state.attachmentsIndex) {
-    if (isPrimaryMediaAttachment(item.type)) {
+    const type = normalizeAttachmentType(item.type);
+    if (mediaTypeFilter === "image" || mediaTypeFilter === "video") {
+      if (type === mediaTypeFilter) {
+        filtered.push(item);
+      }
+      continue;
+    }
+
+    if (isPrimaryMediaAttachment(type)) {
       filtered.push(item);
     }
   }
@@ -1862,6 +1949,7 @@ function updateAttachmentsUi() {
     dom.attachmentsMediaOnlyToggle.checked = state.attachmentsMediaOnly;
     dom.attachmentsMediaOnlyToggle.disabled = totalCount === 0;
   }
+  updateAttachmentsTypeFilterUi();
   if (dom.attachmentsScrollTopBtn) {
     dom.attachmentsScrollTopBtn.disabled = totalCount === 0;
   }
@@ -1885,7 +1973,8 @@ function updateAttachmentsUi() {
       dom.attachmentsCount.textContent = "0 вложений";
     } else if (state.attachmentsMediaOnly) {
       dom.attachmentsCount.textContent =
-        `${visibleCount.toLocaleString("ru-RU")} из ${totalCount.toLocaleString("ru-RU")} вложений`;
+        `${getAttachmentsFilterLabel()}: ${visibleCount.toLocaleString("ru-RU")} ` +
+        `из ${totalCount.toLocaleString("ru-RU")} вложений`;
     } else {
       dom.attachmentsCount.textContent = `${totalCount.toLocaleString("ru-RU")} вложений`;
     }
@@ -2009,10 +2098,11 @@ function renderAttachmentList({ restoreScroll = false, startIndex = null } = {})
     state.attachmentsPendingRevealId = null;
     const empty = document.createElement("p");
     empty.className = "attachments-list-empty";
-    empty.textContent =
-      state.attachmentsIndex.length && state.attachmentsMediaOnly
-        ? "По фильтру «Исключить лишнее» нет фото и видео."
-        : "Во вложениях этого диалога ничего не найдено.";
+    if (state.attachmentsIndex.length && state.attachmentsMediaOnly) {
+      empty.textContent = `По фильтру «${getAttachmentsFilterLabel()}» ничего не найдено.`;
+    } else {
+      empty.textContent = "Во вложениях этого диалога ничего не найдено.";
+    }
     dom.attachmentsList.appendChild(empty);
     return;
   }
@@ -2343,7 +2433,8 @@ function createAttachmentListThumb(item) {
   slot.className = "attachments-item-thumb";
 
   if (item.type === "image" || item.type === "video") {
-    const previewUrl = resolveMediaUrl(item.thumbUrl || item.url);
+    const previewSource = item.type === "video" ? item.thumbUrl : item.thumbUrl || item.url;
+    const previewUrl = resolveMediaUrl(previewSource);
     if (!previewUrl) {
       const badge = document.createElement("span");
       badge.className = "attachments-item-thumb-badge";
@@ -2666,6 +2757,7 @@ function openMediaViewer({ type = "", url = "", poster = "", title = "", attachm
 
   state.mediaViewerOpen = true;
   state.mediaViewerType = resolvedType;
+  state.mediaViewerRawUrl = url;
   state.mediaViewerUrl = resolvedUrl;
   state.mediaViewerPoster = resolvedPoster;
   state.mediaViewerTitle = title || getAttachmentTypeLabel(resolvedType || type);
@@ -2684,6 +2776,7 @@ function closeMediaViewer({ restoreFocus = false } = {}) {
 
   state.mediaViewerOpen = false;
   state.mediaViewerType = "";
+  state.mediaViewerRawUrl = "";
   state.mediaViewerUrl = "";
   state.mediaViewerPoster = "";
   state.mediaViewerTitle = "";
@@ -2739,6 +2832,40 @@ function renderMediaViewerContent() {
   }
 
   if (type === "video") {
+    if (!canRenderVideoSource(state.mediaViewerRawUrl || src, src)) {
+      const preview = document.createElement("div");
+      preview.className = "media-viewer-video-link";
+
+      const previewMedia = document.createElement("div");
+      previewMedia.className = "media-viewer-video-poster";
+
+      if (state.mediaViewerPoster) {
+        const image = document.createElement("img");
+        image.src = state.mediaViewerPoster;
+        image.alt = state.mediaViewerTitle || "Видео";
+        previewMedia.appendChild(image);
+      } else {
+        const badge = document.createElement("span");
+        badge.className = "media-viewer-video-badge";
+        badge.textContent = "VID";
+        previewMedia.appendChild(badge);
+      }
+
+      const note = document.createElement("p");
+      note.textContent = "Это ссылка на страницу видео, а не прямой видеофайл.";
+
+      const link = document.createElement("a");
+      link.className = "media-viewer-original-link";
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Открыть оригинал";
+
+      preview.append(previewMedia, note, link);
+      dom.mediaViewerStage.appendChild(preview);
+      return;
+    }
+
     const video = document.createElement("video");
     video.controls = true;
     video.preload = "metadata";
@@ -3088,6 +3215,106 @@ function isProbablyAbsoluteUrl(value) {
   return /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(value);
 }
 
+function isDirectVideoPath(value) {
+  return /\.(mp4|webm|m4v|mov|mkv|ogv|ogg)(?:$|[?#])/i.test(String(value || ""));
+}
+
+function getUrlParts(value) {
+  const source = String(value || "").trim();
+  if (!source) {
+    return null;
+  }
+
+  try {
+    return new URL(source, "https://chat-emulator.local");
+  } catch {
+    return null;
+  }
+}
+
+function isKnownVideoPageUrl(value) {
+  const url = getUrlParts(value);
+  if (!url) {
+    return false;
+  }
+
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  const path = url.pathname.toLowerCase();
+  if (
+    (host === "vk.com" || host === "m.vk.com") &&
+    /^\/(?:video|clip|video_ext\.php)/.test(path)
+  ) {
+    return true;
+  }
+
+  return (host === "vkvideo.ru" || host.endsWith(".vkvideo.ru")) && /^\/video/.test(path);
+}
+
+function isKnownDirectVideoHost(value) {
+  const url = getUrlParts(value);
+  if (!url) {
+    return false;
+  }
+
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  return host === "vkuservideo.net" || host.endsWith(".vkuservideo.net");
+}
+
+function getMediaAssetKey(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!url || isProbablyAbsoluteUrl(url)) {
+    return "";
+  }
+
+  return normalizeRelPath(url.split("#")[0].split("?")[0]);
+}
+
+function getMediaAssetFile(rawUrl) {
+  const key = getMediaAssetKey(rawUrl);
+  if (!key || !(state.assetFiles instanceof Map)) {
+    return null;
+  }
+
+  return state.assetFiles.get(key) || null;
+}
+
+function canRenderVideoSource(rawUrl, resolvedUrl = "") {
+  const raw = String(rawUrl || "").trim();
+  const resolved = String(resolvedUrl || "").trim();
+  if (!raw && !resolved) {
+    return false;
+  }
+
+  if (isKnownVideoPageUrl(raw) || isKnownVideoPageUrl(resolved)) {
+    return false;
+  }
+
+  if (/^blob:/i.test(raw) || /^blob:/i.test(resolved)) {
+    return true;
+  }
+
+  if (/^data:video\//i.test(raw) || /^data:video\//i.test(resolved)) {
+    return true;
+  }
+
+  const assetFile = getMediaAssetFile(raw);
+  if (assetFile) {
+    const mimeType = String(assetFile.type || "").toLowerCase();
+    return (
+      mimeType.startsWith("video/") ||
+      isDirectVideoPath(assetFile.name) ||
+      isDirectVideoPath(raw)
+    );
+  }
+
+  return (
+    isDirectVideoPath(raw) ||
+    isDirectVideoPath(resolved) ||
+    isKnownDirectVideoHost(raw) ||
+    isKnownDirectVideoHost(resolved)
+  );
+}
+
 function resolveMediaUrl(rawUrl) {
   const url = String(rawUrl || "").trim();
   if (!url) {
@@ -3098,7 +3325,7 @@ function resolveMediaUrl(rawUrl) {
     return url;
   }
 
-  const key = normalizeRelPath(url.split("#")[0].split("?")[0]);
+  const key = getMediaAssetKey(url);
   const file = state.assetFiles instanceof Map ? state.assetFiles.get(key) : null;
   if (!file) {
     return url;
@@ -3169,6 +3396,47 @@ function renderAttachments(attachments) {
         continue;
       }
       const poster = resolveMediaUrl(attachment.thumbUrl || "");
+      const canPlayInline = canRenderVideoSource(attachment.url, src);
+
+      if (!canPlayInline) {
+        const link = document.createElement("a");
+        link.className = "attachment-video-preview";
+        link.href = src;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.dataset.mediaOpen = "true";
+        link.dataset.mediaType = "video";
+        link.dataset.mediaUrl = src;
+        link.dataset.mediaPoster = poster || "";
+        link.dataset.mediaTitle = title || "Видео";
+        if (attachmentId !== null) {
+          link.dataset.mediaAttachmentId = String(attachmentId);
+        }
+
+        const media = document.createElement("span");
+        media.className = "attachment-video-preview-media";
+        if (poster) {
+          const image = document.createElement("img");
+          image.loading = "lazy";
+          image.decoding = "async";
+          image.alt = title || "Видео";
+          image.src = poster;
+          media.appendChild(image);
+        } else {
+          const badge = document.createElement("span");
+          badge.className = "attachment-video-preview-badge";
+          badge.textContent = "VID";
+          media.appendChild(badge);
+        }
+
+        const label = document.createElement("span");
+        label.className = "attachment-video-preview-label";
+        label.textContent = title || "Открыть видео";
+
+        link.append(media, label);
+        wrap.appendChild(link);
+        continue;
+      }
 
       const video = document.createElement("video");
       video.className = "attachment-video";

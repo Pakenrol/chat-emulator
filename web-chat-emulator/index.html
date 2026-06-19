@@ -124,6 +124,22 @@
               <input id="attachmentsMediaOnlyToggle" type="checkbox" checked />
               <span>Исключить лишнее</span>
             </label>
+            <div
+              id="attachmentsTypeFilter"
+              class="attachments-type-filter"
+              role="group"
+              aria-label="Тип медиа"
+            >
+              <button type="button" data-attachments-type-filter="media" aria-pressed="true">
+                Медиа
+              </button>
+              <button type="button" data-attachments-type-filter="image" aria-pressed="false">
+                Фото
+              </button>
+              <button type="button" data-attachments-type-filter="video" aria-pressed="false">
+                Видео
+              </button>
+            </div>
             <div class="attachments-scroll-actions" role="group" aria-label="Прокрутка вложений">
               <button id="attachmentsScrollTopBtn" type="button">В начало</button>
               <button id="attachmentsScrollBottomBtn" type="button">В конец</button>
