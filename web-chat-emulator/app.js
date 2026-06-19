@@ -1,5 +1,6 @@
 const ESTIMATED_ROW_HEIGHT = 78;
 const OVERSCAN = 12;
+const MAX_CHAT_SCROLL_HEIGHT = 12_000_000;
 const SEARCH_DEBOUNCE_MS = 160;
 const SEARCH_SUGGESTIONS_OVERSCAN = 8;
 const JUMP_FOCUS_TIMEOUT_MS = 1900;
@@ -85,6 +86,7 @@ const state = {
   previousSearchQuery: "",
   searchFuzzyMode: false,
   previousSearchFuzzyMode: false,
+  renderedPositionOffset: null,
   rowHeights: [],
   tree: null,
   renderedStart: -1,
@@ -587,6 +589,7 @@ function hydrateConversation(payload) {
   state.previousSearchQuery = "";
   state.previousSearchFuzzyMode = state.searchFuzzyMode;
   state.jumpFocusIndex = -1;
+  state.renderedPositionOffset = null;
 
   const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
   const { items: mediaItems, positionById: mediaPositionById } =
@@ -708,6 +711,7 @@ function resetConversationState() {
   state.searchQuery = "";
   state.previousSearchQuery = "";
   state.previousSearchFuzzyMode = state.searchFuzzyMode;
+  state.renderedPositionOffset = null;
   state.rowHeights = [];
   state.tree = null;
   state.renderedStart = -1;
@@ -776,24 +780,33 @@ function renderVisibleMessages(force = false) {
     return;
   }
 
-  const viewportHeight = dom.chatViewport.clientHeight || 1;
-  const scrollTop = dom.chatViewport.scrollTop;
-  const totalHeight = Math.max(state.tree.total(), viewportHeight);
+  const metrics = getChatScrollMetrics();
+  const viewportHeight = metrics.viewportHeight;
+  const logicalScrollTop = getLogicalChatScrollTop(metrics);
+  const physicalScrollTop = dom.chatViewport.scrollTop;
 
-  dom.chatCanvas.style.height = `${Math.ceil(totalHeight)}px`;
+  dom.chatCanvas.style.height = `${Math.ceil(metrics.physicalHeight)}px`;
 
-  const start = Math.max(0, state.tree.lowerBound(scrollTop) - OVERSCAN);
+  const start = Math.max(0, state.tree.lowerBound(logicalScrollTop) - OVERSCAN);
   const end = Math.min(
     state.messages.length - 1,
-    state.tree.lowerBound(scrollTop + viewportHeight) + OVERSCAN,
+    state.tree.lowerBound(logicalScrollTop + viewportHeight) + OVERSCAN,
   );
 
-  if (!force && start === state.renderedStart && end === state.renderedEnd) {
+  const positionOffset = Math.round(physicalScrollTop - logicalScrollTop);
+
+  if (
+    !force &&
+    start === state.renderedStart &&
+    end === state.renderedEnd &&
+    positionOffset === state.renderedPositionOffset
+  ) {
     return;
   }
 
   state.renderedStart = start;
   state.renderedEnd = end;
+  state.renderedPositionOffset = positionOffset;
 
   const fragment = document.createDocumentFragment();
   const activeMessageIndex =
@@ -819,7 +832,7 @@ function renderVisibleMessages(force = false) {
     }
 
     row.dataset.index = String(index);
-    row.style.top = `${state.tree.sum(index)}px`;
+    row.style.top = `${Math.round(state.tree.sum(index) + positionOffset)}px`;
 
     const bubble = document.createElement("div");
     bubble.className = "message-bubble";
@@ -867,9 +880,52 @@ function syncChatCanvasHeight() {
     return;
   }
 
+  const { physicalHeight } = getChatScrollMetrics();
+  dom.chatCanvas.style.height = `${Math.ceil(physicalHeight)}px`;
+}
+
+function getChatScrollMetrics() {
   const viewportHeight = dom.chatViewport.clientHeight || 1;
-  const totalHeight = Math.max(state.tree.total(), viewportHeight);
-  dom.chatCanvas.style.height = `${Math.ceil(totalHeight)}px`;
+  const logicalHeight = state.tree
+    ? Math.max(state.tree.total(), viewportHeight)
+    : viewportHeight;
+  const physicalHeight = Math.max(
+    viewportHeight,
+    Math.min(logicalHeight, MAX_CHAT_SCROLL_HEIGHT),
+  );
+  const logicalMaxScrollTop = Math.max(0, logicalHeight - viewportHeight);
+  const physicalMaxScrollTop = Math.max(0, physicalHeight - viewportHeight);
+
+  return {
+    viewportHeight,
+    logicalHeight,
+    physicalHeight,
+    logicalMaxScrollTop,
+    physicalMaxScrollTop,
+    compressed: physicalHeight < logicalHeight,
+  };
+}
+
+function physicalToLogicalChatScrollTop(physicalScrollTop, metrics = getChatScrollMetrics()) {
+  const physicalValue = clampNumber(physicalScrollTop, 0, metrics.physicalMaxScrollTop);
+  if (!metrics.compressed || metrics.physicalMaxScrollTop <= 0) {
+    return physicalValue;
+  }
+
+  return physicalValue * (metrics.logicalMaxScrollTop / metrics.physicalMaxScrollTop);
+}
+
+function logicalToPhysicalChatScrollTop(logicalScrollTop, metrics = getChatScrollMetrics()) {
+  const logicalValue = clampNumber(logicalScrollTop, 0, metrics.logicalMaxScrollTop);
+  if (!metrics.compressed || metrics.logicalMaxScrollTop <= 0) {
+    return logicalValue;
+  }
+
+  return logicalValue * (metrics.physicalMaxScrollTop / metrics.logicalMaxScrollTop);
+}
+
+function getLogicalChatScrollTop(metrics = getChatScrollMetrics()) {
+  return physicalToLogicalChatScrollTop(dom.chatViewport.scrollTop, metrics);
 }
 
 function scheduleMeasurement() {
@@ -887,7 +943,7 @@ function scheduleMeasurement() {
     }
 
     const shouldPinBottom = state.pinToBottom || isChatNearBottom();
-    const scrollTopBefore = dom.chatViewport.scrollTop;
+    const scrollTopBefore = getLogicalChatScrollTop();
     const anchorIndex = state.tree.lowerBound(scrollTopBefore);
     let deltaBeforeAnchor = 0;
     let changed = false;
@@ -917,11 +973,9 @@ function scheduleMeasurement() {
         scrollToBottom(true);
       } else {
         syncChatCanvasHeight();
-        if (Math.abs(deltaBeforeAnchor) > 0.5) {
-          const maxScrollTop = Math.max(
-            0,
-            dom.chatViewport.scrollHeight - (dom.chatViewport.clientHeight || 1),
-          );
+        const metricsAfterMeasurement = getChatScrollMetrics();
+        if (Math.abs(deltaBeforeAnchor) > 0.5 || metricsAfterMeasurement.compressed) {
+          const maxScrollTop = Math.max(0, metricsAfterMeasurement.logicalMaxScrollTop);
           const targetScrollTop = clampNumber(scrollTopBefore + deltaBeforeAnchor, 0, maxScrollTop);
           setChatScrollTop(targetScrollTop);
         }
@@ -1494,11 +1548,15 @@ function scrollToMessageIndex(index) {
   }
 
   state.pinToBottom = false;
-  const viewportHeight = dom.chatViewport.clientHeight;
+  const viewportHeight = dom.chatViewport.clientHeight || 1;
   const top = state.tree.sum(index);
   const messageHeight = state.rowHeights[index] || ESTIMATED_ROW_HEIGHT;
   const offset = (viewportHeight - messageHeight) * 0.5;
-  const targetScrollTop = Math.max(0, top - offset);
+  const targetScrollTop = clampNumber(
+    top - offset,
+    0,
+    getChatScrollMetrics().logicalMaxScrollTop,
+  );
 
   syncChatCanvasHeight();
   // Force layout so the browser clamps against the current virtual height.
@@ -1522,16 +1580,16 @@ function scrollToMessageIndex(index) {
 
 function setChatScrollTop(value) {
   state.programmaticScroll = true;
-  dom.chatViewport.scrollTop = value;
+  const metrics = getChatScrollMetrics();
+  dom.chatViewport.scrollTop = logicalToPhysicalChatScrollTop(value, metrics);
   requestAnimationFrame(() => {
     state.programmaticScroll = false;
   });
 }
 
 function isChatNearBottom(epsilon = 2) {
-  const viewportHeight = dom.chatViewport.clientHeight || 1;
-  const maxScrollTop = Math.max(0, dom.chatViewport.scrollHeight - viewportHeight);
-  return dom.chatViewport.scrollTop >= maxScrollTop - epsilon;
+  const metrics = getChatScrollMetrics();
+  return getLogicalChatScrollTop(metrics) >= metrics.logicalMaxScrollTop - epsilon;
 }
 
 function scrollToBottom(syncCanvas = false) {
@@ -1545,8 +1603,8 @@ function scrollToBottom(syncCanvas = false) {
     void dom.chatViewport.scrollHeight;
   }
 
-  const maxScroll = Math.max(0, dom.chatViewport.scrollHeight - dom.chatViewport.clientHeight);
-  setChatScrollTop(maxScroll);
+  const { logicalMaxScrollTop } = getChatScrollMetrics();
+  setChatScrollTop(logicalMaxScrollTop);
 }
 
 function jumpToTop() {
@@ -1582,9 +1640,9 @@ function updateScrollNavButtons() {
     return;
   }
 
-  const scrollTop = dom.chatViewport.scrollTop;
-  const viewportHeight = dom.chatViewport.clientHeight || 1;
-  const maxScrollTop = Math.max(0, dom.chatViewport.scrollHeight - viewportHeight);
+  const metrics = getChatScrollMetrics();
+  const scrollTop = getLogicalChatScrollTop(metrics);
+  const maxScrollTop = metrics.logicalMaxScrollTop;
   const epsilon = 2;
 
   dom.scrollToTopBtn.disabled = scrollTop <= epsilon;
