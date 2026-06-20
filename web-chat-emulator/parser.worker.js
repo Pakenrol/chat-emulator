@@ -31,7 +31,7 @@ self.onmessage = async (event) => {
     }
 
     if (payload.type === "parse-html-directory") {
-      await parseHtmlDirectory(payload.entries);
+      await parseHtmlDirectory(payload.entries, payload.dialogLabel);
       return;
     }
   } catch (error) {
@@ -147,7 +147,7 @@ async function parseJsonFile(file) {
   });
 }
 
-async function parseHtmlDirectory(entries) {
+async function parseHtmlDirectory(entries, dialogLabel = "") {
   if (!Array.isArray(entries) || !entries.length) {
     throw new Error("Папка пуста или файлы недоступны");
   }
@@ -177,7 +177,14 @@ async function parseHtmlDirectory(entries) {
   const historyEntries = htmlEntries.filter((entry) =>
     /^history_\d+\.html?$/i.test(basename(entry.relativePath)),
   );
-  const chosenEntries = historyEntries.length ? historyEntries : htmlEntries;
+  const numberedHistoryEntries = htmlEntries.filter((entry) =>
+    isNumberedHistoryEntry(entry.relativePath),
+  );
+  const chosenEntries = historyEntries.length
+    ? historyEntries
+    : numberedHistoryEntries.length
+      ? numberedHistoryEntries
+      : htmlEntries;
 
   chosenEntries.sort((left, right) => {
     const leftIndex = extractHistoryIndex(left.relativePath);
@@ -214,7 +221,7 @@ async function parseHtmlDirectory(entries) {
     });
 
     const baseDir = dirname(relativePath);
-    const parsedMessages = parseVkDumperHistoryHtml(raw, baseDir);
+    const parsedMessages = parseVkDumperHistoryHtml(raw, baseDir, dialogLabel);
 
     for (const msg of parsedMessages) {
       msg.__order = globalOrder;
@@ -255,15 +262,19 @@ async function parseHtmlDirectory(entries) {
     return (left.__order || 0) - (right.__order || 0);
   });
 
-  for (let i = 0; i < messages.length; i += 1) {
-    messages[i].id = i + 1;
-    delete messages[i].__order;
-  }
-
-  const participants = Array.from(participantCounter.entries())
+  const sideParticipants = messages.some((message) => message.__side === "right")
+    ? ["side:right", "side:left"].filter((id) => participantCounter.has(id))
+    : null;
+  const participants = sideParticipants || Array.from(participantCounter.entries())
     .sort((left, right) => right[1] - left[1])
     .map(([id]) => id)
     .slice(0, 2);
+
+  for (let i = 0; i < messages.length; i += 1) {
+    messages[i].id = i + 1;
+    delete messages[i].__order;
+    delete messages[i].__side;
+  }
 
   const fromTimestamp = messages.length ? messages[0]?.timestamp ?? null : null;
   const toTimestamp = messages.length ? messages[messages.length - 1]?.timestamp ?? null : null;
@@ -281,9 +292,13 @@ async function parseHtmlDirectory(entries) {
   });
 }
 
-function parseVkDumperHistoryHtml(rawSource, baseDir) {
+function parseVkDumperHistoryHtml(rawSource, baseDir, dialogLabel = "") {
   const cleaned = String(rawSource || "").replace(/^\uFEFF/, "");
   const blocks = splitVkHistoryMessageBlocks(cleaned);
+  if (!blocks.length) {
+    return parseCrystalPlusHistoryHtml(cleaned, baseDir, dialogLabel);
+  }
+
   const messages = [];
 
   for (const block of blocks) {
@@ -318,6 +333,245 @@ function parseVkDumperHistoryHtml(rawSource, baseDir) {
   }
 
   return messages;
+}
+
+function parseCrystalPlusHistoryHtml(rawSource, baseDir, dialogLabel = "") {
+  const blocks = splitCrystalPlusMessageBlocks(rawSource);
+  const pageTitle = extractDocumentTitle(rawSource);
+  const peerName =
+    normalizeDialogPeerName(dialogLabel) || normalizeDialogPeerName(pageTitle);
+  const messages = [];
+
+  for (const block of blocks) {
+    const isOutgoing = block.side === "right";
+    const from = isOutgoing ? "side:right" : "side:left";
+    const sender = isOutgoing ? "Вы" : peerName || "Собеседник";
+    const avatarUrl = isOutgoing ? "" : extractCrystalPlusAvatarUrl(block.html);
+    const dateText = extractCrystalPlusDateText(block.html);
+    const timestamp = parseVkDateTime(dateText);
+    const attachments = parseCrystalPlusAttachments(block.html, baseDir);
+    const text = extractCrystalPlusMessageText(block.html);
+    const searchText = buildHtmlSearchText(text, attachments);
+
+    messages.push({
+      id: null,
+      from,
+      sender,
+      avatar: avatarUrl,
+      timestamp,
+      text: text || (attachments.length ? "" : "[пустое сообщение]"),
+      searchText,
+      attachments,
+      __side: block.side,
+    });
+  }
+
+  return messages;
+}
+
+function splitCrystalPlusMessageBlocks(html) {
+  const blocks = [];
+  const source = String(html || "");
+  const starts = [];
+  const pattern =
+    /<div\b[^>]*\bclass=(?:"[^"]*\bmessage\b[^"]*\bmessage-(left|right)\b[^"]*"|'[^']*\bmessage\b[^']*\bmessage-(left|right)\b[^']*')[^>]*>/gi;
+  let match = pattern.exec(source);
+
+  while (match) {
+    const side = match[1] || match[2] || "";
+    starts.push({ index: match.index, side });
+    match = pattern.exec(source);
+  }
+
+  for (const item of starts) {
+    const divBlock = extractDivBlock(source, item.index);
+    if (!divBlock) {
+      continue;
+    }
+
+    blocks.push({
+      side: item.side,
+      html: source.slice(item.index, divBlock.endIndex),
+    });
+  }
+
+  return blocks;
+}
+
+function extractDocumentTitle(html) {
+  const match = String(html || "").match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  return normalizeMultilineText(htmlToText(match ? match[1] : ""));
+}
+
+function extractCrystalPlusAvatarUrl(html) {
+  const imgMatch = String(html || "").match(
+    /<img\b[^>]*\bclass=(?:"[^"]*\bavatar\b[^"]*"|'[^']*\bavatar\b[^']*')[^>]*>/i,
+  );
+  if (!imgMatch) {
+    return "";
+  }
+
+  return getHtmlAttribute(imgMatch[0], "src");
+}
+
+function extractCrystalPlusDateText(html) {
+  const match = String(html || "").match(
+    /<span\b[^>]*>\s*(\d{2}\.\d{2}\.\d{4},?\s+\d{1,2}:\d{2}(?::\d{2})?)\s*<\/span>/i,
+  );
+  return collapseWhitespace(decodeHtmlEntities(stripTags(match ? match[1] : "")));
+}
+
+function extractCrystalPlusMessageText(html) {
+  let source = String(html || "");
+  source = source.replace(
+    /<span\b[^>]*>\s*\d{2}\.\d{2}\.\d{4},?\s+\d{1,2}:\d{2}(?::\d{2})?\s*<\/span>/gi,
+    "",
+  );
+  source = source.replace(
+    /<span\b[^>]*\bclass=(?:"[^"]*\babsolute\b[^"]*"|'[^']*\babsolute\b[^']*')[^>]*>[\s\S]*?<\/span>/gi,
+    "",
+  );
+  source = source.replace(
+    /<img\b[^>]*\bclass=(?:"[^"]*\bavatar\b[^"]*"|'[^']*\bavatar\b[^']*')[^>]*>/gi,
+    "",
+  );
+
+  return normalizeMultilineText(htmlToText(source));
+}
+
+function parseCrystalPlusAttachments(html, baseDir) {
+  const source = String(html || "");
+  const attachments = [];
+  const seen = new Set();
+
+  const audioRegex = /<audio\b[\s\S]*?<\/audio>/gi;
+  let match = audioRegex.exec(source);
+  while (match) {
+    const sourceTags = match[0].match(/<source\b[^>]*>/gi) || [];
+    for (const tag of sourceTags) {
+      const srcRaw = getHtmlAttribute(tag, "src");
+      const url = normalizeMediaRef(srcRaw, baseDir);
+      pushUniqueAttachment(attachments, seen, {
+        type: "audio",
+        url,
+        title: "",
+      });
+    }
+    match = audioRegex.exec(source);
+  }
+
+  const videoRegex = /<video\b[\s\S]*?<\/video>/gi;
+  match = videoRegex.exec(source);
+  while (match) {
+    const block = match[0];
+    const videoTag = block.match(/<video\b[^>]*>/i)?.[0] || "";
+    const poster = normalizeMediaRef(getHtmlAttribute(videoTag, "poster"), baseDir);
+    const directSrc = normalizeMediaRef(getHtmlAttribute(videoTag, "src"), baseDir);
+    const sourceTags = block.match(/<source\b[^>]*>/gi) || [];
+
+    if (directSrc) {
+      pushUniqueAttachment(attachments, seen, {
+        type: "video",
+        url: directSrc,
+        thumbUrl: poster,
+        title: "",
+      });
+    }
+
+    for (const tag of sourceTags) {
+      const url = normalizeMediaRef(getHtmlAttribute(tag, "src"), baseDir);
+      pushUniqueAttachment(attachments, seen, {
+        type: "video",
+        url,
+        thumbUrl: poster,
+        title: "",
+      });
+    }
+
+    match = videoRegex.exec(source);
+  }
+
+  const imgRegex = /<img\b[^>]*>/gi;
+  match = imgRegex.exec(source);
+  while (match) {
+    const tag = match[0];
+    const className = getHtmlAttribute(tag, "class");
+    if (/\bavatar\b/i.test(className) || !/\bmessage-media\b/i.test(className)) {
+      match = imgRegex.exec(source);
+      continue;
+    }
+
+    const srcRaw = getHtmlAttribute(tag, "src");
+    const videoRaw = getHtmlAttribute(tag, "data-video");
+    if (videoRaw) {
+      pushUniqueAttachment(attachments, seen, {
+        type: "video",
+        url: normalizeMediaRef(videoRaw, baseDir),
+        thumbUrl: normalizeMediaRef(srcRaw, baseDir),
+        title: "",
+      });
+    } else {
+      pushUniqueAttachment(attachments, seen, {
+        type: "image",
+        url: normalizeMediaRef(srcRaw, baseDir),
+        title: "",
+      });
+    }
+
+    match = imgRegex.exec(source);
+  }
+
+  const anchorRegex = /<a\b[^>]*\bhref=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/a>/gi;
+  match = anchorRegex.exec(source);
+  while (match) {
+    const hrefRaw = String(match[1] || match[2] || "");
+    const href = normalizeMediaRef(hrefRaw, baseDir);
+    const title = normalizeMultilineText(htmlToText(match[3] || ""));
+    if (href && !isNavigatorHref(hrefRaw)) {
+      const type = looksLikeDocument(title, hrefRaw) ? "document" : "link";
+      pushUniqueAttachment(attachments, seen, {
+        type,
+        url: href,
+        title: title || href,
+      });
+    }
+    match = anchorRegex.exec(source);
+  }
+
+  return attachments;
+}
+
+function pushUniqueAttachment(attachments, seen, item) {
+  const type = String(item?.type || "link");
+  const url = String(item?.url || "").trim();
+  const thumbUrl = String(item?.thumbUrl || "").trim();
+  if (!url && !thumbUrl) {
+    return;
+  }
+
+  const key = `${type}:${url || thumbUrl}`;
+  if (seen.has(key)) {
+    return;
+  }
+
+  seen.add(key);
+  attachments.push({
+    ...item,
+    type,
+    url,
+    thumbUrl,
+  });
+}
+
+function isNavigatorHref(value) {
+  return /^\d+\.html?(?:[?#].*)?$/i.test(String(value || "").trim());
+}
+
+function normalizeDialogPeerName(value) {
+  return collapseWhitespace(value)
+    .replace(/\s+\([^)]*\)\s*$/u, "")
+    .replace(/\s+\d+$/u, "")
+    .trim();
 }
 
 function splitVkHistoryMessageBlocks(html) {
@@ -595,6 +849,20 @@ function stripTags(value) {
   return String(value || "").replace(/<[^>]+>/g, "");
 }
 
+function getHtmlAttribute(tag, name) {
+  const safeName = escapeRegExp(String(name || ""));
+  if (!safeName) {
+    return "";
+  }
+
+  const pattern = new RegExp(
+    `\\b${safeName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    "i",
+  );
+  const match = String(tag || "").match(pattern);
+  return match ? decodeHtmlEntities(String(match[1] || match[2] || match[3] || "")) : "";
+}
+
 function htmlToText(html) {
   let value = String(html || "");
   value = value.replace(/\r\n?/g, "\n");
@@ -756,7 +1024,9 @@ function parseVkDateTime(value) {
     return null;
   }
 
-  const match = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})$/);
+  const match = raw.match(
+    /^(\d{2})\.(\d{2})\.(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/,
+  );
   if (!match) {
     return null;
   }
@@ -766,30 +1036,44 @@ function parseVkDateTime(value) {
   const year = Number(match[3]);
   const hours = Number(match[4]);
   const minutes = Number(match[5]);
+  const seconds = match[6] ? Number(match[6]) : 0;
 
   if (
     !Number.isFinite(day) ||
     !Number.isFinite(month) ||
     !Number.isFinite(year) ||
     !Number.isFinite(hours) ||
-    !Number.isFinite(minutes)
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds)
   ) {
     return null;
   }
 
-  const date = new Date(year, month - 1, day, hours, minutes);
+  const date = new Date(year, month - 1, day, hours, minutes, seconds);
   const time = date.getTime();
   return Number.isFinite(time) ? time : null;
 }
 
 function extractHistoryIndex(path) {
-  const match = basename(path).match(/^history_(\d+)\.html?$/i);
+  const match = basename(path).match(/^(?:history_)?(\d+)\.html?$/i);
   if (!match) {
     return null;
   }
 
   const parsed = Number(match[1]);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isNumberedHistoryEntry(path) {
+  if (!/^\d+\.html?$/i.test(basename(path))) {
+    return false;
+  }
+
+  const normalizedDir = dirname(path).replace(/\/$/, "").toLowerCase();
+  const dirName = normalizedDir.split("/").pop();
+  return !["audio", "doc", "docs", "file", "files", "photo", "photos", "video", "videos"].includes(
+    dirName,
+  );
 }
 
 function extractVkProfileId(href) {
@@ -1088,6 +1372,10 @@ function trimLength(value, maxLength) {
   }
 
   return `${value.slice(0, maxLength - 1)}...`;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function dedupe(list) {

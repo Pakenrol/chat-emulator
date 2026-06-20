@@ -547,7 +547,7 @@ function beginLoadDirectory(files) {
     }
   };
 
-  worker.postMessage({ type: "parse-html-directory", entries });
+  worker.postMessage({ type: "parse-html-directory", entries, dialogLabel: rootLabel });
 }
 
 function handleProgress(payload) {
