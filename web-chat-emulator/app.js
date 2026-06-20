@@ -9,6 +9,8 @@ const ATTACHMENTS_INITIAL_BATCH_SIZE = 60;
 const ATTACHMENTS_LOAD_AHEAD_PX = 500;
 const ATTACHMENTS_END_TELEPORT_WINDOW = 160;
 const ATTACHMENTS_PREPEND_CHUNK_SIZE = 80;
+const DIALOG_STATE_STORAGE_PREFIX = "chat-emulator:dialog-state:";
+const DIALOG_STATE_SAVE_DEBOUNCE_MS = 350;
 
 const ATTACHMENT_TYPE_LABELS = {
   image: "Фото",
@@ -32,6 +34,11 @@ const dom = {
   progressBar: document.querySelector("#progressBar"),
   loadStatus: document.querySelector("#loadStatus"),
   chatMeta: document.querySelector("#chatMeta"),
+  dialogsPanel: document.querySelector("#dialogsPanel"),
+  dialogsCount: document.querySelector("#dialogsCount"),
+  dialogSortSelect: document.querySelector("#dialogSortSelect"),
+  dialogFilterInput: document.querySelector("#dialogFilterInput"),
+  dialogsList: document.querySelector("#dialogsList"),
   searchSection: document.querySelector(".search"),
   searchInput: document.querySelector("#searchInput"),
   searchModeToggle: document.querySelector("#searchModeToggle"),
@@ -126,6 +133,15 @@ const state = {
   mediaViewerAttachmentId: null,
   mediaAttachments: [],
   mediaAttachmentPosById: new Map(),
+  dialogs: [],
+  dialogsById: new Map(),
+  activeDialogId: null,
+  dialogSortMode: "time",
+  dialogFilterQuery: "",
+  dialogPositions: new Map(),
+  dialogSessionKey: "",
+  dialogStateSaveId: null,
+  pendingDirectorySourceKey: "",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
@@ -246,6 +262,31 @@ function attachEvents() {
 
   dom.searchInput.addEventListener("keydown", handleSearchInputKeydown);
 
+  dom.dialogSortSelect?.addEventListener("change", () => {
+    state.dialogSortMode = normalizeDialogSortMode(dom.dialogSortSelect.value);
+    renderDialogsList();
+    scheduleDialogStateSave();
+  });
+
+  dom.dialogFilterInput?.addEventListener("input", () => {
+    state.dialogFilterQuery = String(dom.dialogFilterInput.value || "").trim().toLowerCase();
+    renderDialogsList();
+  });
+
+  dom.dialogsList?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const item = target.closest("[data-dialog-id]");
+    if (!(item instanceof HTMLElement)) {
+      return;
+    }
+
+    selectDialog(item.dataset.dialogId || "");
+  });
+
   dom.searchSuggestions.addEventListener("mousedown", (event) => {
     const target = event.target;
     if (target instanceof Element && target.closest(".search-suggestion")) {
@@ -342,6 +383,7 @@ function attachEvents() {
   dom.chatViewport.addEventListener("scroll", () => {
     renderVisibleMessages();
     updateScrollNavButtons();
+    rememberActiveDialogPosition();
 
     if (
       state.pinToBottom &&
@@ -360,6 +402,11 @@ function attachEvents() {
       state.suggestionsRenderedEnd = -1;
       scheduleSearchSuggestionsRender(true);
     }
+  });
+
+  window.addEventListener("beforeunload", () => {
+    saveActiveDialogPosition();
+    persistDialogState();
   });
 
   if (typeof ResizeObserver !== "undefined") {
@@ -506,6 +553,7 @@ function beginLoadDirectory(files) {
   dom.searchStatus.textContent = "Идёт загрузка папки...";
 
   const rootLabel = inferDirectoryLabel(files);
+  state.pendingDirectorySourceKey = buildDirectorySourceKey(files, rootLabel);
   setStatus(`Чтение папки: ${rootLabel}`, 0.05);
   setEmptyState("Идёт обработка HTML‑истории...");
 
@@ -543,11 +591,20 @@ function beginLoadDirectory(files) {
     }
 
     if (payload.type === "ready") {
-      hydrateConversation(payload);
+      if (Array.isArray(payload.dialogs)) {
+        hydrateDialogCollection(payload);
+      } else {
+        hydrateConversation(payload);
+      }
     }
   };
 
-  worker.postMessage({ type: "parse-html-directory", entries, dialogLabel: rootLabel });
+  worker.postMessage({
+    type: "parse-html-directory",
+    entries,
+    dialogLabel: rootLabel,
+    sourceKey: state.pendingDirectorySourceKey,
+  });
 }
 
 function handleProgress(payload) {
@@ -555,6 +612,7 @@ function handleProgress(payload) {
   const format = String(payload.format || "");
   const parsingLabel = format === "html" ? "Парсинг HTML" : "Парсинг JSON";
   const phaseMap = {
+    catalog: "Каталог диалогов",
     scanning: "Сканирование",
     reading: "Чтение",
     parsing: parsingLabel,
@@ -567,10 +625,13 @@ function handleProgress(payload) {
   setStatus(`${phaseText}... ${percent}%`, progress);
 }
 
-function hydrateConversation(payload) {
+function hydrateConversation(payload, options = {}) {
+  const { fromWorker = true, restoreScroll = true, announce = true } = options;
   state.loading = false;
-  state.worker?.terminate();
-  state.worker = null;
+  if (fromWorker) {
+    state.worker?.terminate();
+    state.worker = null;
+  }
 
   state.messages = Array.isArray(payload.messages) ? payload.messages : [];
   state.searchCorpus = state.messages.map((message) => {
@@ -594,6 +655,9 @@ function hydrateConversation(payload) {
   state.previousSearchFuzzyMode = state.searchFuzzyMode;
   state.jumpFocusIndex = -1;
   state.renderedPositionOffset = null;
+  state.pinToBottom = false;
+  state.programmaticScroll = false;
+  dom.chatCanvas.replaceChildren();
 
   const { items: attachmentItems, byId: attachmentsById } = buildAttachmentsIndex(state.messages);
   const { items: mediaItems, positionById: mediaPositionById } =
@@ -625,9 +689,12 @@ function hydrateConversation(payload) {
   if (!state.messages.length) {
     setStatus("Источник загружен, но сообщений не найдено.", 1);
     dom.searchStatus.textContent = "Совпадений: 0";
-    dom.chatMeta.textContent = "Нет сообщений в загруженном источнике";
+    dom.chatMeta.textContent = payload.title
+      ? `${payload.title} | нет сообщений`
+      : "Нет сообщений в загруженном источнике";
     updateAttachmentsUi();
     setEmptyState("В источнике нет сообщений.");
+    updateDialogsListSelection();
     return;
   }
 
@@ -660,8 +727,14 @@ function hydrateConversation(payload) {
   const toTime = state.messages[state.messages.length - 1]?.timestamp;
   const fromLabel = Number.isFinite(fromTime) ? dateFormatter.format(fromTime) : "?";
   const toLabel = Number.isFinite(toTime) ? dateFormatter.format(toTime) : "?";
+  const titlePrefix = payload.title ? `${payload.title} | ` : "";
+  const sizeLabel = Number.isFinite(payload.byteSize) && payload.byteSize > 0
+    ? ` | ${formatByteSize(payload.byteSize)}`
+    : "";
 
-  dom.chatMeta.textContent = `${state.messages.length.toLocaleString("ru-RU")} сообщений | ${fromLabel} - ${toLabel}${participantNames ? ` | ${participantNames}` : ""}`;
+  dom.chatMeta.textContent =
+    `${titlePrefix}${state.messages.length.toLocaleString("ru-RU")} сообщений | ` +
+    `${fromLabel} - ${toLabel}${participantNames ? ` | ${participantNames}` : ""}${sizeLabel}`;
 
   dom.searchInput.disabled = false;
   dom.searchStatus.textContent = "Введите текст для поиска";
@@ -671,13 +744,583 @@ function hydrateConversation(payload) {
   closeSearchSuggestions();
   updateAttachmentsUi();
 
-  setStatus("Диалог успешно загружен.", 1);
+  if (announce) {
+    setStatus(`Диалог открыт: ${payload.title || "без названия"}`, 1);
+  }
   clearEmptyState();
 
-  // Open at the beginning by default; navigation buttons allow jumping to the end.
-  dom.chatViewport.scrollTop = 0;
+  const restoredScrollTop = restoreScroll ? getRestoredDialogScrollTop(payload.dialogId) : null;
+  if (Number.isFinite(restoredScrollTop)) {
+    syncChatCanvasHeight();
+    setChatScrollTop(restoredScrollTop);
+  } else {
+    dom.chatViewport.scrollTop = 0;
+  }
+
   renderVisibleMessages(true);
   updateScrollNavButtons();
+  updateDialogsListSelection();
+}
+
+function hydrateDialogCollection(payload) {
+  state.loading = false;
+  state.worker?.terminate();
+  state.worker = null;
+
+  const dialogs = Array.isArray(payload.dialogs) ? payload.dialogs : [];
+  state.dialogs = dialogs
+    .filter((dialog) => dialog && typeof dialog === "object")
+    .map((dialog, index) => normalizeDialogSummary(dialog, index));
+  state.dialogsById = new Map(state.dialogs.map((dialog) => [dialog.id, dialog]));
+  state.activeDialogId = null;
+  state.dialogFilterQuery = "";
+  state.dialogSessionKey = String(payload.sourceKey || state.pendingDirectorySourceKey || "");
+  state.dialogPositions = new Map();
+
+  if (dom.dialogFilterInput) {
+    dom.dialogFilterInput.value = "";
+  }
+  if (dom.dialogSortSelect) {
+    state.dialogSortMode = normalizeDialogSortMode(dom.dialogSortSelect.value);
+    dom.dialogSortSelect.value = state.dialogSortMode;
+  }
+
+  const storedState = loadStoredDialogState();
+  const storedActiveDialogId =
+    storedState && typeof storedState.activeDialogId === "string"
+      ? storedState.activeDialogId
+      : "";
+  if (storedState?.positions && typeof storedState.positions === "object") {
+    for (const [dialogId, position] of Object.entries(storedState.positions)) {
+      const normalizedPosition = normalizeStoredDialogPosition(position);
+      if (normalizedPosition) {
+        state.dialogPositions.set(dialogId, normalizedPosition);
+      }
+    }
+  }
+  if (storedState?.sortMode) {
+    state.dialogSortMode = normalizeDialogSortMode(storedState.sortMode);
+    if (dom.dialogSortSelect) {
+      dom.dialogSortSelect.value = state.dialogSortMode;
+    }
+  }
+
+  if (!state.dialogs.length) {
+    setStatus("Папка загружена, но диалоги не найдены.", 1);
+    dom.searchStatus.textContent = "Поиск недоступен";
+    dom.chatMeta.textContent = "Нет диалогов в загруженной папке";
+    setEmptyState("В папке не найдено HTML‑диалогов.");
+    renderDialogsList();
+    return;
+  }
+
+  renderDialogsList();
+
+  const sortedDialogs = getSortedDialogs();
+  const initialDialogId = state.dialogsById.has(storedActiveDialogId)
+    ? storedActiveDialogId
+    : sortedDialogs[0]?.id;
+
+  setStatus(
+    `Загружено диалогов: ${state.dialogs.length.toLocaleString("ru-RU")}`,
+    1,
+  );
+
+  if (initialDialogId) {
+    selectDialog(initialDialogId, { restoreScroll: true, announce: false });
+  }
+}
+
+function normalizeDialogSummary(dialog, index) {
+  const fallbackId = `dialog:${index + 1}`;
+  const id = String(dialog.id || dialog.path || fallbackId);
+  const title = String(dialog.title || dialog.label || id || "Диалог").trim() || "Диалог";
+  const messages = Array.isArray(dialog.messages) ? dialog.messages : [];
+  const stats = dialog.stats && typeof dialog.stats === "object" ? dialog.stats : {};
+  const firstTimestamp = normalizeFiniteNumber(dialog.firstTimestamp ?? stats.from);
+  const lastTimestamp = normalizeFiniteNumber(dialog.lastTimestamp ?? stats.to);
+  const messageCount = normalizeCount(dialog.messageCount ?? stats.messageCount ?? messages.length);
+  const byteSize = normalizeCount(dialog.byteSize ?? dialog.size ?? 0);
+  const fileCount = normalizeCount(dialog.fileCount ?? 0);
+
+  return {
+    ...dialog,
+    id,
+    title,
+    category: String(dialog.category || "").trim(),
+    path: String(dialog.path || ""),
+    messages,
+    profiles: Array.isArray(dialog.profiles) ? dialog.profiles : [],
+    participants: Array.isArray(dialog.participants) ? dialog.participants : [],
+    stats: {
+      ...stats,
+      messageCount,
+      from: firstTimestamp,
+      to: lastTimestamp,
+    },
+    messageCount,
+    byteSize,
+    fileCount,
+    firstTimestamp,
+    lastTimestamp,
+    lastMessagePreview: String(dialog.lastMessagePreview || "").trim(),
+    lastSender: String(dialog.lastSender || "").trim(),
+  };
+}
+
+function selectDialog(dialogId, options = {}) {
+  const normalizedId = String(dialogId || "");
+  const dialog = state.dialogsById.get(normalizedId);
+  if (!dialog) {
+    return;
+  }
+
+  if (state.activeDialogId === normalizedId) {
+    return;
+  }
+
+  saveActiveDialogPosition();
+  state.activeDialogId = normalizedId;
+  closeSearchSuggestions();
+  closeAttachmentsPanel({ restoreFocus: false });
+  closeMediaViewer({ restoreFocus: false });
+
+  hydrateConversation(
+    {
+      ...dialog,
+      dialogId: dialog.id,
+      messages: dialog.messages,
+      profiles: dialog.profiles,
+      participants: dialog.participants,
+      stats: dialog.stats,
+      title: dialog.title,
+      byteSize: dialog.byteSize,
+    },
+    {
+      fromWorker: false,
+      restoreScroll: options.restoreScroll !== false,
+      announce: options.announce !== false,
+    },
+  );
+
+  scheduleDialogStateSave();
+}
+
+function getSortedDialogs() {
+  const dialogs = state.dialogs.slice();
+  const sortMode = normalizeDialogSortMode(state.dialogSortMode);
+
+  dialogs.sort((left, right) => {
+    if (sortMode === "messages") {
+      return (
+        right.messageCount - left.messageCount ||
+        right.byteSize - left.byteSize ||
+        compareTimestampsDesc(left.lastTimestamp, right.lastTimestamp) ||
+        left.title.localeCompare(right.title, "ru")
+      );
+    }
+
+    if (sortMode === "size") {
+      return (
+        right.byteSize - left.byteSize ||
+        right.messageCount - left.messageCount ||
+        compareTimestampsDesc(left.lastTimestamp, right.lastTimestamp) ||
+        left.title.localeCompare(right.title, "ru")
+      );
+    }
+
+    return (
+      compareTimestampsDesc(left.lastTimestamp, right.lastTimestamp) ||
+      right.messageCount - left.messageCount ||
+      left.title.localeCompare(right.title, "ru")
+    );
+  });
+
+  return dialogs;
+}
+
+function getVisibleDialogs() {
+  const sorted = getSortedDialogs();
+  const query = state.dialogFilterQuery;
+  if (!query) {
+    return sorted;
+  }
+
+  return sorted.filter((dialog) => {
+    const haystack = `${dialog.title}\n${dialog.category}\n${dialog.path}`.toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function renderDialogsList() {
+  if (!dom.dialogsPanel || !dom.dialogsList) {
+    return;
+  }
+
+  dom.dialogsPanel.hidden = !state.dialogs.length;
+  dom.dialogsList.replaceChildren();
+
+  if (dom.dialogsCount) {
+    const total = state.dialogs.length;
+    const filtered = getVisibleDialogs().length;
+    dom.dialogsCount.textContent = state.dialogFilterQuery && filtered !== total
+      ? `${filtered.toLocaleString("ru-RU")} из ${total.toLocaleString("ru-RU")} диалогов`
+      : `${total.toLocaleString("ru-RU")} диалогов`;
+  }
+
+  if (!state.dialogs.length) {
+    return;
+  }
+
+  const dialogs = getVisibleDialogs();
+  if (!dialogs.length) {
+    const empty = document.createElement("p");
+    empty.className = "dialogs-empty";
+    empty.textContent = "По фильтру ничего не найдено.";
+    dom.dialogsList.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const dialog of dialogs) {
+    fragment.appendChild(createDialogListItem(dialog));
+  }
+  dom.dialogsList.appendChild(fragment);
+}
+
+function createDialogListItem(dialog) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dialog-item";
+  button.dataset.dialogId = dialog.id;
+  button.role = "option";
+  const isActive = dialog.id === state.activeDialogId;
+  button.setAttribute("aria-selected", isActive ? "true" : "false");
+  if (isActive) {
+    button.classList.add("active");
+  }
+
+  const avatar = document.createElement("span");
+  avatar.className = "dialog-avatar";
+  avatar.textContent = getDialogInitials(dialog.title);
+
+  const main = document.createElement("span");
+  main.className = "dialog-main";
+
+  const titleLine = document.createElement("span");
+  titleLine.className = "dialog-title-line";
+
+  const title = document.createElement("span");
+  title.className = "dialog-title";
+  title.textContent = dialog.title;
+
+  const time = document.createElement("span");
+  time.className = "dialog-time";
+  time.textContent = formatDialogListTime(dialog.lastTimestamp);
+
+  titleLine.append(title, time);
+
+  const metaLine = document.createElement("span");
+  metaLine.className = "dialog-meta-line";
+
+  const category = document.createElement("span");
+  category.className = "dialog-category";
+  category.textContent = dialog.category || "Без категории";
+
+  const stats = document.createElement("span");
+  stats.className = "dialog-stats";
+  stats.textContent =
+    `${dialog.messageCount.toLocaleString("ru-RU")} сообщ. · ${formatByteSize(dialog.byteSize)}`;
+
+  metaLine.append(category, stats);
+
+  const preview = document.createElement("p");
+  preview.className = "dialog-preview";
+  preview.textContent = dialog.lastMessagePreview || "Нет текстового превью";
+
+  if (hasSavedDialogPosition(dialog.id)) {
+    const marker = document.createElement("span");
+    marker.className = "dialog-position";
+    marker.title = "Позиция сохранена";
+    stats.prepend(marker);
+  }
+
+  main.append(titleLine, metaLine, preview);
+  button.append(avatar, main);
+  return button;
+}
+
+function updateDialogsListSelection() {
+  if (!dom.dialogsList) {
+    return;
+  }
+
+  const items = dom.dialogsList.querySelectorAll(".dialog-item");
+  for (const item of items) {
+    if (!(item instanceof HTMLElement)) {
+      continue;
+    }
+    const isActive = item.dataset.dialogId === state.activeDialogId;
+    item.classList.toggle("active", isActive);
+    item.setAttribute("aria-selected", isActive ? "true" : "false");
+  }
+}
+
+function rememberActiveDialogPosition() {
+  if (!state.activeDialogId || !state.tree || !state.messages.length) {
+    return;
+  }
+
+  const position = captureDialogPosition();
+  if (!position) {
+    return;
+  }
+
+  state.dialogPositions.set(state.activeDialogId, position);
+  scheduleDialogStateSave();
+}
+
+function saveActiveDialogPosition() {
+  if (!state.activeDialogId || !state.tree || !state.messages.length) {
+    return;
+  }
+
+  const position = captureDialogPosition();
+  if (position) {
+    state.dialogPositions.set(state.activeDialogId, position);
+  }
+}
+
+function captureDialogPosition() {
+  if (!state.tree || !state.messages.length) {
+    return null;
+  }
+
+  const logicalScrollTop = getLogicalChatScrollTop();
+  const anchorIndex = clampNumber(
+    state.tree.lowerBound(logicalScrollTop + 24),
+    0,
+    state.messages.length - 1,
+  );
+  const anchorTop = state.tree.sum(anchorIndex);
+  const offset = logicalScrollTop - anchorTop;
+
+  return {
+    scrollTop: Math.max(0, logicalScrollTop),
+    index: anchorIndex,
+    offset,
+    savedAt: Date.now(),
+  };
+}
+
+function getRestoredDialogScrollTop(dialogId) {
+  const id = String(dialogId || state.activeDialogId || "");
+  if (!id || !state.tree || !state.messages.length) {
+    return null;
+  }
+
+  const position = state.dialogPositions.get(id);
+  if (!position) {
+    return null;
+  }
+
+  const index = Number(position.index);
+  if (Number.isInteger(index) && index >= 0 && index < state.messages.length) {
+    return clampNumber(
+      state.tree.sum(index) + normalizeFiniteNumber(position.offset, 0),
+      0,
+      getChatScrollMetrics().logicalMaxScrollTop,
+    );
+  }
+
+  const scrollTop = normalizeFiniteNumber(position.scrollTop);
+  if (Number.isFinite(scrollTop)) {
+    return clampNumber(scrollTop, 0, getChatScrollMetrics().logicalMaxScrollTop);
+  }
+
+  return null;
+}
+
+function hasSavedDialogPosition(dialogId) {
+  const position = state.dialogPositions.get(String(dialogId || ""));
+  if (!position) {
+    return false;
+  }
+
+  const scrollTop = normalizeFiniteNumber(position.scrollTop, 0);
+  const index = Number(position.index);
+  return scrollTop > 8 || index > 0;
+}
+
+function scheduleDialogStateSave() {
+  if (!state.dialogSessionKey) {
+    return;
+  }
+
+  if (state.dialogStateSaveId) {
+    clearTimeout(state.dialogStateSaveId);
+  }
+
+  state.dialogStateSaveId = setTimeout(() => {
+    state.dialogStateSaveId = null;
+    persistDialogState();
+  }, DIALOG_STATE_SAVE_DEBOUNCE_MS);
+}
+
+function persistDialogState() {
+  if (!state.dialogSessionKey) {
+    return;
+  }
+
+  const positions = {};
+  for (const [dialogId, position] of state.dialogPositions.entries()) {
+    positions[dialogId] = {
+      scrollTop: normalizeFiniteNumber(position.scrollTop, 0),
+      index: normalizeCount(position.index),
+      offset: normalizeFiniteNumber(position.offset, 0),
+      savedAt: normalizeCount(position.savedAt),
+    };
+  }
+
+  try {
+    localStorage.setItem(
+      `${DIALOG_STATE_STORAGE_PREFIX}${state.dialogSessionKey}`,
+      JSON.stringify({
+        activeDialogId: state.activeDialogId || "",
+        sortMode: normalizeDialogSortMode(state.dialogSortMode),
+        positions,
+      }),
+    );
+  } catch {
+    // Private browsing or storage limits should not block the parser.
+  }
+}
+
+function loadStoredDialogState() {
+  if (!state.dialogSessionKey) {
+    return null;
+  }
+
+  try {
+    const raw = localStorage.getItem(`${DIALOG_STATE_STORAGE_PREFIX}${state.dialogSessionKey}`);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStoredDialogPosition(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const index = Number(value.index);
+
+  return {
+    scrollTop: normalizeFiniteNumber(value.scrollTop, 0),
+    index: Number.isInteger(index) && index >= 0 ? index : null,
+    offset: normalizeFiniteNumber(value.offset, 0),
+    savedAt: normalizeCount(value.savedAt),
+  };
+}
+
+function normalizeDialogSortMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "messages" || normalized === "size") {
+    return normalized;
+  }
+  return "time";
+}
+
+function compareTimestampsDesc(left, right) {
+  const leftValue = Number.isFinite(left) ? left : Number.NEGATIVE_INFINITY;
+  const rightValue = Number.isFinite(right) ? right : Number.NEGATIVE_INFINITY;
+  if (leftValue === rightValue) {
+    return 0;
+  }
+  return rightValue - leftValue;
+}
+
+function getDialogInitials(title) {
+  const words = String(title || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) {
+    return "?";
+  }
+
+  return words
+    .slice(0, 2)
+    .map((word) => word.charAt(0).toUpperCase())
+    .join("");
+}
+
+function formatDialogListTime(timestamp) {
+  if (!Number.isFinite(timestamp)) {
+    return "без времени";
+  }
+
+  const date = new Date(timestamp);
+  const now = new Date();
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return new Intl.DateTimeFormat("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(timestamp);
+  }
+
+  if (date.getFullYear() === now.getFullYear()) {
+    return new Intl.DateTimeFormat("ru-RU", {
+      day: "2-digit",
+      month: "short",
+    }).format(timestamp);
+  }
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+  }).format(timestamp);
+}
+
+function formatByteSize(value) {
+  const bytes = normalizeCount(value);
+  if (bytes < 1024) {
+    return `${bytes} Б`;
+  }
+
+  const units = ["КБ", "МБ", "ГБ"];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = size >= 10 ? 0 : 1;
+  return `${size.toFixed(digits).replace(".", ",")} ${units[unitIndex]}`;
+}
+
+function normalizeFiniteNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
 }
 
 function resetConversationState() {
@@ -689,6 +1332,11 @@ function resetConversationState() {
   if (state.jumpFocusTimeoutId) {
     clearTimeout(state.jumpFocusTimeoutId);
     state.jumpFocusTimeoutId = null;
+  }
+
+  if (state.dialogStateSaveId) {
+    clearTimeout(state.dialogStateSaveId);
+    state.dialogStateSaveId = null;
   }
 
   if (state.assetUrlCache instanceof Map) {
@@ -717,6 +1365,8 @@ function resetConversationState() {
   state.previousSearchQuery = "";
   state.previousSearchFuzzyMode = state.searchFuzzyMode;
   state.renderedPositionOffset = null;
+  state.pinToBottom = false;
+  state.programmaticScroll = false;
   state.rowHeights = [];
   state.tree = null;
   state.renderedStart = -1;
@@ -753,6 +1403,13 @@ function resetConversationState() {
   state.mediaViewerAttachmentId = null;
   state.mediaAttachments = [];
   state.mediaAttachmentPosById = new Map();
+  state.dialogs = [];
+  state.dialogsById = new Map();
+  state.activeDialogId = null;
+  state.dialogFilterQuery = "";
+  state.dialogPositions = new Map();
+  state.dialogSessionKey = "";
+  state.pendingDirectorySourceKey = "";
 
   dom.chatCanvas.replaceChildren();
   dom.searchInput.disabled = true;
@@ -763,6 +1420,21 @@ function resetConversationState() {
   dom.searchSuggestionsCanvas.style.height = "0px";
   dom.searchSuggestionsCanvas.replaceChildren();
   updateSearchModeToggleUi();
+  if (dom.dialogsPanel) {
+    dom.dialogsPanel.hidden = true;
+  }
+  if (dom.dialogsList) {
+    dom.dialogsList.replaceChildren();
+  }
+  if (dom.dialogsCount) {
+    dom.dialogsCount.textContent = "0 диалогов";
+  }
+  if (dom.dialogFilterInput) {
+    dom.dialogFilterInput.value = "";
+  }
+  if (dom.dialogSortSelect) {
+    state.dialogSortMode = normalizeDialogSortMode(dom.dialogSortSelect.value);
+  }
 
   dom.scrollToTopBtn.disabled = true;
   dom.scrollToBottomBtn.disabled = true;
@@ -2980,6 +3652,62 @@ function inferDirectoryLabel(files) {
   const path = getFileRelativePath(first);
   const firstSegment = path.split("/")[0];
   return firstSegment || "папка";
+}
+
+function buildDirectorySourceKey(files, rootLabel) {
+  const normalizedFiles = Array.from(files || [])
+    .map((file) => {
+      const relativePath = normalizeRelPath(getFileRelativePath(file) || file?.name || "");
+      return {
+        path: relativePath,
+        size: normalizeCount(file?.size),
+        modified: normalizeCount(file?.lastModified),
+      };
+    })
+    .filter((item) => item.path)
+    .sort((left, right) => left.path.localeCompare(right.path, "ru"));
+
+  let totalSize = 0;
+  let latestModified = 0;
+  for (const item of normalizedFiles) {
+    totalSize += item.size;
+    latestModified = Math.max(latestModified, item.modified);
+  }
+
+  const samples = [];
+  const sampleLimit = 18;
+  for (let index = 0; index < normalizedFiles.length && samples.length < sampleLimit; index += 1) {
+    const item = normalizedFiles[index];
+    samples.push(`${item.path}:${item.size}:${item.modified}`);
+  }
+  for (
+    let index = Math.max(0, normalizedFiles.length - sampleLimit);
+    index < normalizedFiles.length;
+    index += 1
+  ) {
+    const item = normalizedFiles[index];
+    samples.push(`${item.path}:${item.size}:${item.modified}`);
+  }
+
+  const signature = [
+    rootLabel || "folder",
+    normalizedFiles.length,
+    totalSize,
+    latestModified,
+    ...samples,
+  ].join("\n");
+
+  return hashString(signature);
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  const source = String(value || "");
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function prepareDirectoryEntries(files) {

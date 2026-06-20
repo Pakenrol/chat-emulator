@@ -52,56 +52,90 @@
         <div id="chatMeta" class="chat-meta">Нет активного диалога</div>
       </section>
 
-      <section class="search card">
-        <label class="search-label" for="searchInput">Поиск по сообщениям</label>
-        <div class="search-row">
-          <input
-            id="searchInput"
-            type="search"
-            placeholder="Введите текст"
-            autocomplete="off"
-            aria-controls="searchSuggestions"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-autocomplete="list"
-            disabled
-          />
-          <button
-            id="searchModeToggle"
-            class="search-mode-toggle"
-            type="button"
-            aria-pressed="false"
-            disabled
-          >
-            Fuzzy: выкл
-          </button>
-          <button id="prevMatchBtn" type="button" disabled>Prev</button>
-          <button id="nextMatchBtn" type="button" disabled>Next</button>
-        </div>
-        <div
-          id="searchSuggestions"
-          class="search-suggestions"
-          role="listbox"
+      <div class="workspace">
+        <section
+          id="dialogsPanel"
+          class="dialogs card"
+          aria-labelledby="dialogsTitle"
           hidden
         >
-          <div id="searchSuggestionsCanvas" class="search-suggestions-canvas"></div>
-        </div>
-        <div id="searchStatus" class="search-status">Поиск недоступен</div>
-      </section>
+          <header class="dialogs-header">
+            <div>
+              <h2 id="dialogsTitle">Диалоги</h2>
+              <p id="dialogsCount" class="dialogs-count">0 диалогов</p>
+            </div>
+            <label class="dialogs-sort-label" for="dialogSortSelect">
+              Сортировка
+              <select id="dialogSortSelect">
+                <option value="time">По времени</option>
+                <option value="messages">По длине</option>
+                <option value="size">По размеру</option>
+              </select>
+            </label>
+          </header>
+          <input
+            id="dialogFilterInput"
+            class="dialog-filter-input"
+            type="search"
+            placeholder="Найти диалог"
+            autocomplete="off"
+          />
+          <div id="dialogsList" class="dialogs-list" role="listbox"></div>
+        </section>
 
-      <section class="chat card">
-        <div class="chat-toolbar" aria-label="Навигация по переписке">
-          <button id="openAttachmentsBtn" type="button" disabled>Вложения</button>
-          <button id="scrollToTopBtn" type="button" disabled>В начало</button>
-          <button id="scrollToBottomBtn" type="button" disabled>В конец</button>
+        <div class="chat-stack">
+          <section class="search card">
+            <label class="search-label" for="searchInput">Поиск по сообщениям</label>
+            <div class="search-row">
+              <input
+                id="searchInput"
+                type="search"
+                placeholder="Введите текст"
+                autocomplete="off"
+                aria-controls="searchSuggestions"
+                aria-expanded="false"
+                aria-haspopup="listbox"
+                aria-autocomplete="list"
+                disabled
+              />
+              <button
+                id="searchModeToggle"
+                class="search-mode-toggle"
+                type="button"
+                aria-pressed="false"
+                disabled
+              >
+                Fuzzy: выкл
+              </button>
+              <button id="prevMatchBtn" type="button" disabled>Prev</button>
+              <button id="nextMatchBtn" type="button" disabled>Next</button>
+            </div>
+            <div
+              id="searchSuggestions"
+              class="search-suggestions"
+              role="listbox"
+              hidden
+            >
+              <div id="searchSuggestionsCanvas" class="search-suggestions-canvas"></div>
+            </div>
+            <div id="searchStatus" class="search-status">Поиск недоступен</div>
+          </section>
+
+          <section class="chat card">
+            <div class="chat-toolbar" aria-label="Навигация по переписке">
+              <button id="openAttachmentsBtn" type="button" disabled>Вложения</button>
+              <button id="scrollToTopBtn" type="button" disabled>В начало</button>
+              <button id="scrollToBottomBtn" type="button" disabled>В конец</button>
+            </div>
+            <div id="chatViewport" class="chat-viewport">
+              <div id="chatCanvas" class="chat-canvas"></div>
+              <div id="emptyState" class="empty-state">
+                Загрузите JSON или папку с HTML, чтобы увидеть переписку.
+              </div>
+            </div>
+          </section>
         </div>
-        <div id="chatViewport" class="chat-viewport">
-          <div id="chatCanvas" class="chat-canvas"></div>
-          <div id="emptyState" class="empty-state">
-            Загрузите JSON или папку с HTML, чтобы увидеть переписку.
-          </div>
-        </div>
-      </section>
+      </div>
     </main>
 
     <section

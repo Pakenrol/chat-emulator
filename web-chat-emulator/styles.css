@@ -170,6 +170,203 @@ button:disabled {
   font-size: 0.92rem;
 }
 
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.chat-stack {
+  display: grid;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.dialogs {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  max-height: min(86vh, 900px);
+  max-height: min(86dvh, 900px);
+  overflow: hidden;
+  position: sticky;
+  top: 1rem;
+}
+
+.dialogs-header {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.dialogs-header h2 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.dialogs-count {
+  margin: 0.18rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.dialogs-sort-label {
+  display: grid;
+  gap: 0.28rem;
+  color: #514a42;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.dialogs-sort-label select,
+.dialog-filter-input {
+  width: 100%;
+  min-height: 2.45rem;
+  border: 1px solid #c8b8a5;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.dialogs-sort-label select {
+  padding: 0.45rem 0.58rem;
+}
+
+.dialog-filter-input {
+  padding: 0.5rem 0.62rem;
+  min-width: 0;
+}
+
+.dialogs-list {
+  min-height: 220px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.42rem;
+  padding-right: 0.1rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.dialog-item {
+  width: 100%;
+  min-height: 0;
+  padding: 0.55rem;
+  border-radius: 12px;
+  border: 1px solid #decbb4;
+  background: #fffaf2;
+  display: grid;
+  grid-template-columns: 2.35rem minmax(0, 1fr);
+  gap: 0.55rem;
+  text-align: left;
+}
+
+.dialog-item:hover:enabled {
+  background: #fff2df;
+}
+
+.dialog-item.active {
+  background: #173f4f;
+  border-color: #173f4f;
+  color: #fff;
+}
+
+.dialog-avatar {
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #d8f1e5;
+  color: #173f4f;
+  font-weight: 800;
+}
+
+.dialog-item.active .dialog-avatar {
+  background: #fff8ef;
+  color: #173f4f;
+}
+
+.dialog-main {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.dialog-title-line,
+.dialog-meta-line {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.dialog-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 800;
+}
+
+.dialog-time {
+  flex: 0 0 auto;
+  color: #776c62;
+  font-size: 0.73rem;
+}
+
+.dialog-category,
+.dialog-stats {
+  min-width: 0;
+  color: #6a625a;
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog-stats {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.dialog-preview {
+  margin: 0;
+  color: #5f574f;
+  font-size: 0.82rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.dialog-position {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 50%;
+  background: #d36934;
+  flex: 0 0 auto;
+}
+
+.dialog-item.active .dialog-time,
+.dialog-item.active .dialog-category,
+.dialog-item.active .dialog-stats,
+.dialog-item.active .dialog-preview {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.dialogs-empty {
+  margin: 0;
+  padding: 0.65rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .search {
   padding: 0.85rem 1rem 1rem;
   display: grid;
@@ -974,6 +1171,26 @@ button:disabled {
 
   .upload-row > * {
     width: 100%;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    gap: 0.62rem;
+  }
+
+  .chat-stack {
+    gap: 0.62rem;
+  }
+
+  .dialogs {
+    position: static;
+    max-height: min(44vh, 360px);
+    max-height: min(44dvh, 360px);
+    padding: 0.72rem;
+  }
+
+  .dialogs-list {
+    min-height: 170px;
   }
 
   .file-button,

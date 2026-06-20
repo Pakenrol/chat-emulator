@@ -31,7 +31,7 @@ self.onmessage = async (event) => {
     }
 
     if (payload.type === "parse-html-directory") {
-      await parseHtmlDirectory(payload.entries, payload.dialogLabel);
+      await parseHtmlDirectory(payload.entries, payload.dialogLabel, payload.sourceKey);
       return;
     }
   } catch (error) {
@@ -147,12 +147,12 @@ async function parseJsonFile(file) {
   });
 }
 
-async function parseHtmlDirectory(entries, dialogLabel = "") {
+async function parseHtmlDirectory(entries, dialogLabel = "", sourceKey = "") {
   if (!Array.isArray(entries) || !entries.length) {
     throw new Error("Папка пуста или файлы недоступны");
   }
 
-  postMessage({ type: "progress", phase: "scanning", progress: 0.05, format: "html" });
+  postMessage({ type: "progress", phase: "scanning", progress: 0.03, format: "html" });
 
   const htmlEntries = entries
     .map((entry) => {
@@ -162,7 +162,7 @@ async function parseHtmlDirectory(entries, dialogLabel = "") {
       }
 
       const relativePath = typeof entry?.relativePath === "string" ? entry.relativePath : file.name;
-      if (!/\.html?$/i.test(file.name)) {
+      if (!/\.html?$/i.test(relativePath)) {
         return null;
       }
 
@@ -174,41 +174,123 @@ async function parseHtmlDirectory(entries, dialogLabel = "") {
     throw new Error("В папке нет HTML файлов");
   }
 
-  const historyEntries = htmlEntries.filter((entry) =>
-    /^history_\d+\.html?$/i.test(basename(entry.relativePath)),
-  );
-  const numberedHistoryEntries = htmlEntries.filter((entry) =>
-    isNumberedHistoryEntry(entry.relativePath),
-  );
-  const chosenEntries = historyEntries.length
-    ? historyEntries
-    : numberedHistoryEntries.length
-      ? numberedHistoryEntries
-      : htmlEntries;
+  postMessage({ type: "progress", phase: "catalog", progress: 0.06, format: "html" });
 
-  chosenEntries.sort((left, right) => {
-    const leftIndex = extractHistoryIndex(left.relativePath);
-    const rightIndex = extractHistoryIndex(right.relativePath);
-    if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) {
-      return leftIndex - rightIndex;
+  const groups = buildHtmlDialogGroups(htmlEntries, dialogLabel);
+  if (!groups.length) {
+    throw new Error("В папке не найдено HTML страниц диалогов");
+  }
+
+  const totalFiles = Math.max(
+    1,
+    groups.reduce((sum, group) => sum + group.entries.length, 0),
+  );
+  const dialogs = [];
+  let processedFiles = 0;
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    const group = groups[groupIndex];
+    const dialog = await parseHtmlDialogGroup(group, {
+      processedFiles,
+      totalFiles,
+    });
+    processedFiles += group.entries.length;
+    dialogs.push(dialog);
+  }
+
+  dialogs.sort((left, right) => {
+    const leftTime = Number.isFinite(left.lastTimestamp) ? left.lastTimestamp : Number.NEGATIVE_INFINITY;
+    const rightTime = Number.isFinite(right.lastTimestamp) ? right.lastTimestamp : Number.NEGATIVE_INFINITY;
+    if (leftTime !== rightTime) {
+      return rightTime - leftTime;
     }
 
-    return left.relativePath.localeCompare(right.relativePath, "ru");
+    return right.messageCount - left.messageCount || left.title.localeCompare(right.title, "ru");
   });
 
+  postMessage({
+    type: "ready",
+    sourceKey: typeof sourceKey === "string" ? sourceKey : "",
+    dialogs,
+    stats: {
+      dialogCount: dialogs.length,
+      messageCount: dialogs.reduce((sum, dialog) => sum + dialog.messageCount, 0),
+      byteSize: dialogs.reduce((sum, dialog) => sum + dialog.byteSize, 0),
+    },
+  });
+}
+
+function buildHtmlDialogGroups(htmlEntries, rootLabel = "") {
+  const messageEntries = htmlEntries.filter((entry) => isDialogMessageHtmlEntry(entry.relativePath));
+  const grouped = new Map();
+
+  for (const entry of messageEntries) {
+    const dir = stripTrailingSlash(dirname(entry.relativePath));
+    const key = dir || "__root__";
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(entry);
+  }
+
+  if (!grouped.size) {
+    return [];
+  }
+
+  const groups = [];
+  for (const [key, groupEntries] of grouped.entries()) {
+    const path = key === "__root__" ? "" : key;
+    const entries = groupEntries.slice().sort(compareHistoryEntries);
+    const title = inferDialogTitle(path, rootLabel);
+
+    groups.push({
+      id: path || `root:${collapseWhitespace(rootLabel) || "dialog"}`,
+      path,
+      title,
+      category: inferDialogCategory(path, rootLabel),
+      entries,
+      fileCount: entries.length,
+      byteSize: entries.reduce((sum, entry) => sum + (entry.file?.size || 0), 0),
+    });
+  }
+
+  groups.sort((left, right) => left.title.localeCompare(right.title, "ru"));
+  return groups;
+}
+
+function isDialogMessageHtmlEntry(path) {
+  const base = basename(path);
+  if (/^history_\d+\.html?$/i.test(base)) {
+    return true;
+  }
+  return isNumberedHistoryEntry(path);
+}
+
+function compareHistoryEntries(left, right) {
+  const leftIndex = extractHistoryIndex(left.relativePath);
+  const rightIndex = extractHistoryIndex(right.relativePath);
+  if (leftIndex !== null && rightIndex !== null && leftIndex !== rightIndex) {
+    return leftIndex - rightIndex;
+  }
+
+  return left.relativePath.localeCompare(right.relativePath, "ru");
+}
+
+async function parseHtmlDialogGroup(group, progressState) {
   const profilesById = new Map();
   const participantCounter = new Map();
   const messages = [];
 
   let globalOrder = 0;
-  const totalFiles = Math.max(1, chosenEntries.length);
+  const totalFiles = Math.max(1, progressState.totalFiles);
 
-  for (let index = 0; index < chosenEntries.length; index += 1) {
-    const entry = chosenEntries[index];
+  for (let index = 0; index < group.entries.length; index += 1) {
+    const entry = group.entries[index];
     const file = entry.file;
     const relativePath = entry.relativePath;
+    const globalIndex = progressState.processedFiles + index;
 
-    const progressBase = 0.08 + (index / totalFiles) * 0.82;
+    const progressBase = 0.08 + (globalIndex / totalFiles) * 0.84;
     postMessage({ type: "progress", phase: "reading", progress: progressBase, format: "html" });
 
     const raw = await file.text();
@@ -216,12 +298,12 @@ async function parseHtmlDirectory(entries, dialogLabel = "") {
     postMessage({
       type: "progress",
       phase: "parsing",
-      progress: Math.min(0.12 + (index / totalFiles) * 0.82, 0.95),
+      progress: Math.min(0.1 + (globalIndex / totalFiles) * 0.84, 0.94),
       format: "html",
     });
 
     const baseDir = dirname(relativePath);
-    const parsedMessages = parseVkDumperHistoryHtml(raw, baseDir, dialogLabel);
+    const parsedMessages = parseVkDumperHistoryHtml(raw, baseDir, group.title);
 
     for (const msg of parsedMessages) {
       msg.__order = globalOrder;
@@ -250,7 +332,7 @@ async function parseHtmlDirectory(entries, dialogLabel = "") {
     }
   }
 
-  postMessage({ type: "progress", phase: "sorting", progress: 0.96, format: "html" });
+  postMessage({ type: "progress", phase: "sorting", progress: 0.94, format: "html" });
 
   messages.sort((left, right) => {
     const leftTime = Number.isFinite(left.timestamp) ? left.timestamp : Infinity;
@@ -278,18 +360,67 @@ async function parseHtmlDirectory(entries, dialogLabel = "") {
 
   const fromTimestamp = messages.length ? messages[0]?.timestamp ?? null : null;
   const toTimestamp = messages.length ? messages[messages.length - 1]?.timestamp ?? null : null;
+  const lastMessage = messages[messages.length - 1] || null;
+  const lastMessagePreview = lastMessage
+    ? trimLength(collapseWhitespace(lastMessage.searchText || lastMessage.text || ""), 140)
+    : "";
 
-  postMessage({
-    type: "ready",
+  return {
+    id: group.id,
+    title: group.title,
+    category: group.category,
+    path: group.path,
     messages,
     profiles: Array.from(profilesById.values()),
     participants,
+    messageCount: messages.length,
+    fileCount: group.fileCount,
+    byteSize: group.byteSize,
+    firstTimestamp: fromTimestamp,
+    lastTimestamp: toTimestamp,
+    lastMessagePreview,
+    lastSender: lastMessage?.sender || "",
     stats: {
       messageCount: messages.length,
       from: fromTimestamp,
       to: toTimestamp,
     },
-  });
+  };
+}
+
+function inferDialogTitle(path, rootLabel = "") {
+  const normalizedPath = stripTrailingSlash(path);
+  if (!normalizedPath) {
+    return collapseWhitespace(rootLabel) || "Диалог";
+  }
+
+  const parts = normalizedPath.split("/").filter(Boolean);
+  return collapseWhitespace(parts[parts.length - 1] || rootLabel) || "Диалог";
+}
+
+function inferDialogCategory(path, rootLabel = "") {
+  const normalizedPath = stripTrailingSlash(path);
+  if (!normalizedPath) {
+    return "";
+  }
+
+  const parts = normalizedPath.split("/").filter(Boolean);
+  const conversationsIndex = parts.findIndex((part) => part.toLowerCase() === "переписки");
+  if (conversationsIndex >= 0 && parts.length > conversationsIndex + 2) {
+    return parts[conversationsIndex + 1];
+  }
+  if (parts.length >= 2) {
+    return parts[parts.length - 2];
+  }
+  const normalizedRoot = collapseWhitespace(rootLabel);
+  if (normalizedRoot && normalizedRoot !== parts[0]) {
+    return normalizedRoot;
+  }
+  return "";
+}
+
+function stripTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/g, "");
 }
 
 function parseVkDumperHistoryHtml(rawSource, baseDir, dialogLabel = "") {
